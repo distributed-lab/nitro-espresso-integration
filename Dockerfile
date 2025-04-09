@@ -381,29 +381,45 @@ RUN tar -xzf socat-1.7.4.4.tar.gz && \
     make && \
     make install
 
+FROM golang:1.23.1-bookworm AS nitro-attestation-cli-builder
+WORKDIR /workspace
+COPY --from=nsmlib-export / target/
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -y git && \
+    git clone https://github.com/distributed-lab/enclave-extras.git && \
+    cd enclave-extras && \
+    git checkout v0.1.1
+RUN mkdir -p /workspace/target && \
+    cp -R /workspace/enclave-extras/nitro-attestation-cli/* /workspace && \
+    cp -R /workspace/pkgconfig /workspace/target/
+RUN for file in /workspace/target/pkgconfig/*.pc; do \
+    sed -i 's/\/path\/to\/lib/\/workspace\/target\/lib/g' "$file"; \
+    done
+RUN go mod download
+RUN mkdir -p target/bin
+RUN PKG_CONFIG_PATH=/workspace/target/pkgconfig go build -o target/bin/nitro-attestation-cli .
+
 FROM nitro-node AS nitro-node-enclave
 USER root
 COPY --from=socat-builder /usr/local/bin/socat /usr/local/bin/
+COPY --from=nitro-attestation-cli-builder /workspace/target/bin/nitro-attestation-cli /usr/local/bin/
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y \
     iproute2 \
     nfs-common \
+    cryptsetup \
+    xxd \
     supervisor &&\
-    mkdir -p /home/user/export/.arbitrum && \
-    mkdir -p /home/user/export/.aws && \
-    mkdir -p /home/user/export/config && \
-    rm -fr /home/user/.arbitrum && \
-    ln -fs /home/user/export/.arbitrum /home/user/.arbitrum && \
-    ln -fs /home/user/export/.aws /home/user/.aws && \
-    ln -fs /home/user/export/config /home/user/config && \
-    chown -R user:user /home/user && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /var/cache/ldconfig/aux-cache /usr/lib/python3.9/__pycache__/ /usr/lib/python3.9/*/__pycache__/ /var/log/*
 COPY ./supervisord.conf /etc/supervisor/supervisord.conf
 WORKDIR /home/user/
 COPY ./runeif.sh .
-RUN chmod 700 runeif.sh
+COPY ./close_chain.sh .
+RUN chmod 700 runeif.sh && \
+    chmod 700 close_chain.sh
 ENTRYPOINT [ "/home/user/runeif.sh" ]
 
 FROM nitro-node AS nitro-node-default

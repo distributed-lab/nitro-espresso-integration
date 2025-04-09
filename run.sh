@@ -22,10 +22,10 @@ socat TCP-LISTEN:$RPC_HTTP_PORT,fork,reuseaddr,keepalive VSOCK-CONNECT:$ENCLAVE_
 # RPC WS
 socat TCP-LISTEN:$RPC_WS_PORT,fork,reuseaddr,keepalive VSOCK-CONNECT:$ENCLAVE_CID:10001,keepalive &
 
-nitro-cli run-enclave --eif-path /home/nitro.eif --enclave-cid $ENCLAVE_CID --cpu-count $CPU_COUNT --memory $MEMORY_MIB
+nitro-cli run-enclave --eif-path /home/nitro.eif --enclave-cid $ENCLAVE_CID --cpu-count $CPU_COUNT --memory $MEMORY_MIB $EXTRA_OPTIONS
 enclave_id=$(nitro-cli describe-enclaves | jq -r ".[0].EnclaveID")
 echo "-------------------------------"
 echo "Enclave ID is $enclave_id"
 echo "-------------------------------"
 
-nitro-cli console --enclave-id $enclave_id # blocking call.
+nitro-cli console --enclave-id $enclave_id || true && tail -f /dev/null
