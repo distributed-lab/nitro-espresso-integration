@@ -275,13 +275,24 @@ func mainImpl() int {
 		}
 	}
 	if validatorNeedsKey || nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
-		l1TransactionOptsValidator, _, err = util.OpenWallet("l1-validator", &nodeConfig.Node.Staker.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
-		if err != nil {
-			flag.Usage()
-			log.Crit("error opening Validator parent chain wallet", "path", nodeConfig.Node.Staker.ParentChainWallet.Pathname, "account", nodeConfig.Node.Staker.ParentChainWallet.Account, "err", err)
-		}
-		if nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
-			return 0
+		if nodeConfig.Node.Staker.EnableAWSNitro {
+			l1TransactionOptsValidator, err = util.OpenEnclaveValidatorWallet("l1-validator", &nodeConfig.Node.Staker.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
+			if err != nil {
+				flag.Usage()
+				log.Crit("error opening Validator enclave parent chain wallet", "path", nodeConfig.Node.Staker.ParentChainWallet.Pathname, "err", err)
+			}
+			if nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
+				return 0
+			}
+		} else {
+			l1TransactionOptsValidator, _, err = util.OpenWallet("l1-validator", &nodeConfig.Node.Staker.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
+			if err != nil {
+				flag.Usage()
+				log.Crit("error opening Validator parent chain wallet", "path", nodeConfig.Node.Staker.ParentChainWallet.Pathname, "account", nodeConfig.Node.Staker.ParentChainWallet.Account, "err", err)
+			}
+			if nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
+				return 0
+			}
 		}
 	}
 
