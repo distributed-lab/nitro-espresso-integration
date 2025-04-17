@@ -66,13 +66,46 @@ jobs:
           make nitro-cli
           sudo cp build/nitro_cli/release/nitro-cli /usr/bin
           sudo mkdir --mode=0777 -p /var/log/nitro_enclaves
-          sudo mkdir -p /usr/share/nitro_enclaves/blobs
-          sudo cp -r blobs/x86_64/* /usr/share/nitro_enclaves/blobs
           cd ..
           rm -rf aws-nitro-enclaves-cli
           docker system prune -f
           docker rmi nitro_cli:1.0
 
+      # Build AWS Nitro Enclave kernel
+      - name: Build AWS Nitro Enclave kernel
+        run: |
+          git clone https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap.git
+          cd aws-nitro-enclaves-sdk-bootstrap
+
+          tee -a kernel/microvm-kernel-config-x86_64 <<EOF
+          CONFIG_MD=y
+          CONFIG_MD_BITMAP_FILE=y
+          CONFIG_BLK_DEV_DM_BUILTIN=y
+          CONFIG_BLK_DEV_DM=y
+          CONFIG_DM_CRYPT=y    
+          EOF
+
+          tee -a kernel/microvm-kernel-config-aarch64 <<EOF
+          CONFIG_MD=y
+          CONFIG_MD_BITMAP_FILE=y
+          CONFIG_BLK_DEV_DM_BUILTIN=y
+          CONFIG_BLK_DEV_DM=y
+          CONFIG_DM_CRYPT=y    
+          EOF
+
+          docker build -t blobs_all .
+          docker create --name extract_blobs blobs_all
+          docker cp extract_blobs:/blobs ./blobs
+          docker rm extract_blobs
+
+          sudo mkdir -p /usr/share/nitro_enclaves/blobs
+          sudo cp blobs/* /usr/share/nitro_enclaves/blobs
+
+          cd ..
+          rm -rf aws-nitro-enclaves-sdk-bootstrap
+          docker system prune -f
+          docker rmi blobs_all:latest
+          
       # Check out the code
       - name: Checkout Code
         uses: actions/checkout@v4
