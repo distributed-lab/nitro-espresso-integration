@@ -43,6 +43,7 @@ precompile_names = AddressTable Aggregator BLS Debug FunctionTable GasInfo Info 
 precompiles = $(patsubst %,./solgen/generated/%.go, $(precompile_names))
 
 output_root=target
+sed_escaped_output_root:=$(subst /,\/,$(output_root))
 output_latest=$(output_root)/machines/latest
 
 repo_dirs = arbos arbcompress arbnode arbutil arbstate cmd das espressocrypto precompiles solgen system_tests util validator wavmio
@@ -169,6 +170,20 @@ $(espresso_crypto_lib): $(DEP_PREDICATE) $(espresso_crypto_files)
 	cargo build --release --manifest-path $(espresso_crypto_dir)/Cargo.toml
 	install $(espresso_crypto_dir)/target/release/libespresso_crypto_helper.a $@
 
+aws_nsm_dir = ./aws-nitro-enclaves-nsm-api
+aws_nsm_files = $(wildcard $(aws_nsm_dir)/*.toml $(aws_nsm_dir)/src/*.rs)
+aws_nsm_lib = $(output_root)/lib/libnsm.a
+
+.PHONY: build-aws-nsm-lib
+build-aws-nsm-lib: $(aws_nsm_lib)
+
+$(aws_nsm_lib): $(DEP_PREDICATE) $(aws_nsm_files)
+	mkdir -p `dirname $(aws_nsm_lib)`
+	cargo build --release --manifest-path $(aws_nsm_dir)/Cargo.toml -p nsm-lib
+	install $(aws_nsm_dir)/target/release/libnsm.a $@
+	mkdir -p $(output_root)/pkgconfig
+	cp ./pkgconfig/libnsm.pc $(output_root)/pkgconfig
+
 .PHONY: push
 push: lint test-go .make/fmt
 	@printf "%bdone building %s%b\n" $(color_pink) $$(expr $$(echo $? | wc -w) - 1) $(color_reset)
@@ -183,7 +198,10 @@ build: $(patsubst %,$(output_root)/bin/%, nitro deploy relay daserver datool seq
 	@printf $(done)
 
 .PHONY: build-node-deps
-build-node-deps: $(go_source) build-prover-header build-prover-lib build-jit .make/solgen .make/cbrotli-lib build-espresso-crypto-lib
+build-node-deps: $(go_source) build-prover-header build-prover-lib build-jit .make/solgen .make/cbrotli-lib build-espresso-crypto-lib build-aws-nsm-lib
+	@for file in $(output_root)/pkgconfig/*.pc; do \
+		sed -i 's/\/path\/to\/lib/$(sed_escaped_output_root)\/lib/g' "$$file"; \
+	done
 
 .PHONY: test-go-deps
 test-go-deps: \
@@ -302,6 +320,7 @@ clean:
 	@rm -f .make/*
 	rm -rf brotli/buildfiles
 	cargo clean --manifest-path $(espresso_crypto_dir)/Cargo.toml
+	cargo clean --manifest-path $(aws_nsm_dir)/Cargo.toml
 
 # Ensure lib64 is a symlink to lib
 	mkdir -p $(output_root)/lib
@@ -316,7 +335,7 @@ docker:
 # regular build rules
 
 $(output_root)/bin/nitro: $(DEP_PREDICATE) build-node-deps
-	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/nitro"
+	export PKG_CONFIG_PATH=$(abspath $(output_root)/pkgconfig) && go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/nitro"
 
 $(output_root)/bin/deploy: $(DEP_PREDICATE) build-node-deps
 	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/deploy"
