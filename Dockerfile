@@ -368,5 +368,43 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
 
 USER user
 
+FROM debian:bookworm-slim AS socat-builder
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -y \
+    wget make gcc
+RUN wget http://www.dest-unreach.org/socat/download/socat-1.7.4.4.tar.gz
+RUN echo "0f8f4b9d5c60b8c53d17b60d79ababc4a0f51b3bb6d2bd3ae8a6a4b9d68f195e socat-1.7.4.4.tar.gz" | sha256sum -c -
+RUN tar -xzf socat-1.7.4.4.tar.gz && \
+    cd socat-1.7.4.4 && \
+    ./configure && \
+    make && \
+    make install
+
+FROM nitro-node AS nitro-node-enclave
+USER root
+COPY --from=socat-builder /usr/local/bin/socat /usr/local/bin/
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -y \
+    iproute2 \
+    nfs-common \
+    supervisor &&\
+    mkdir -p /home/user/export/.arbitrum && \
+    mkdir -p /home/user/export/.aws && \
+    mkdir -p /home/user/export/config && \
+    rm -fr /home/user/.arbitrum && \
+    ln -fs /home/user/export/.arbitrum /home/user/.arbitrum && \
+    ln -fs /home/user/export/.aws /home/user/.aws && \
+    ln -fs /home/user/export/config /home/user/config && \
+    chown -R user:user /home/user && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /usr/share/doc/* /var/cache/ldconfig/aux-cache /usr/lib/python3.9/__pycache__/ /usr/lib/python3.9/*/__pycache__/ /var/log/*
+COPY ./supervisord.conf /etc/supervisor/supervisord.conf
+WORKDIR /home/user/
+COPY ./runeif.sh .
+RUN chmod 700 runeif.sh
+ENTRYPOINT [ "/home/user/runeif.sh" ]
+
 FROM nitro-node AS nitro-node-default
 # Just to ensure nitro-node-dist is default
