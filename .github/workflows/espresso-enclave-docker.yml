@@ -1,0 +1,108 @@
+name: Build K8s-ready container with eif
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - '**'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: Make more disk space available on public runner
+        run: |
+          # rmz seems to be faster at deleting files than rm
+          cargo binstall -y rmz
+          sudo mv /home/runner/.cargo/bin/rmz /usr/local/bin/rmz
+
+          echo "Available storage before:"
+          sudo df -h
+          echo
+
+          sudo rmz -f $AGENT_TOOLSDIRECTORY
+          sudo rmz -f /opt/az
+          sudo rmz -f /opt/ghc
+          sudo rmz -f /opt/google
+          sudo rmz -f /opt/microsoft
+          sudo rmz -f /opt/pipx
+          sudo rmz -f /usr/lib/mono
+          sudo rmz -f /usr/local/julia*
+          sudo rmz -f /usr/local/lib/android
+          sudo rmz -f /usr/local/lib/node_modules
+          sudo rmz -f /usr/local/share/boost
+          sudo rmz -f /usr/local/share/chromium
+          sudo rmz -f /usr/local/share/powershell
+          sudo rmz -f /usr/share/az_*
+          sudo rmz -f /usr/share/dotnet
+          sudo rmz -f /usr/share/gradle-*
+          sudo rmz -f /usr/share/swift
+
+          echo "Available storage after:"
+          sudo df -h
+          echo
+
+      - name: Fix submodule permissions check
+        run: |
+          git config --global --add safe.directory '*'
+
+      # Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Install AWS Nitro CLI
+      - name: Install Nitro CLI
+        run: |
+          sudo apt install build-essential
+          git clone https://github.com/aws/aws-nitro-enclaves-cli.git
+          cd aws-nitro-enclaves-cli
+          make nitro-cli
+          sudo cp build/nitro_cli/release/nitro-cli /usr/bin
+          sudo mkdir --mode=0777 -p /var/log/nitro_enclaves
+          sudo mkdir -p /usr/share/nitro_enclaves/blobs
+          sudo cp -r blobs/x86_64/* /usr/share/nitro_enclaves/blobs
+          cd ..
+          rm -rf aws-nitro-enclaves-cli
+          docker system prune -f
+          docker rmi nitro_cli:1.0
+
+      # Check out the code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Build the main Docker image
+      - name: Build Docker Image
+        run: |
+          docker build --no-cache \
+            -f Dockerfile \
+            --target nitro-node-enclave \
+            -t nitro-node-enclave:latest .
+
+      # Create directory for artifacts
+      - name: Create Output Directory
+        run: |
+          mkdir -p output
+
+      # Create the EIF file
+      - name: Create EIF
+        run: |
+          nitro-cli build-enclave --docker-uri nitro-node-enclave:latest --output-file output/nitro.eif
+
+      # Log in to GitHub Container Registry
+      - name: Log In to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
+
+      # Build and push the enclave Docker image
+      - name: Build and Push Enclave Docker Image
+        run: |
+          docker build -f Dockerfile.enclave -t ghcr.io/${{ github.repository }}:${{ github.sha }} .
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}

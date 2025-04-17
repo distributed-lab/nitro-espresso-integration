@@ -12,7 +12,7 @@ FROM amazonlinux:2023
 COPY --from=socat-builder /usr/local/bin/socat /usr/local/bin/
 RUN yum install aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq python3-pip -y
 RUN pip3 install supervisor
-COPY ./nitro.eif /home
+COPY output/nitro.eif /home
 COPY ./run.sh  /home
 RUN chmod +x /home/run.sh
 
