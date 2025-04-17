@@ -57,22 +57,51 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Log in to GitHub Container Registry
+      - name: Log In to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
+
+      - run: mkdir -p ~/nitro-cache
+      - id: nitro-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/nitro-cache
+          key: nitro-cache-${{ runner.os }}
+
       # Install AWS Nitro CLI
       - name: Install Nitro CLI
+        if: steps.nitro-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt install build-essential
           git clone https://github.com/aws/aws-nitro-enclaves-cli.git
           cd aws-nitro-enclaves-cli
           make nitro-cli
           sudo cp build/nitro_cli/release/nitro-cli /usr/bin
-          sudo mkdir --mode=0777 -p /var/log/nitro_enclaves
+          sudo cp build/nitro_cli/release/nitro-cli ~/nitro-cache/
           cd ..
           rm -rf aws-nitro-enclaves-cli
           docker system prune -f
           docker rmi nitro_cli:1.0
 
-      # Build AWS Nitro Enclave kernel
-      - name: Build AWS Nitro Enclave kernel
+      - if: steps.nitro-cache.outputs.cache-hit == 'true'
+        run: sudo cp ~/nitro-cache/nitro-cli /usr/bin
+
+      - name: Create folder for logs
+        run: |
+          sudo mkdir --mode=0777 -p /var/log/nitro_enclaves
+
+
+      - run: mkdir -p ~/nitro-kernel-cache
+      - id: nitro-kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/nitro-kernel-cache
+          key: nitro-kernal-cache-${{ runner.os }}
+
+      # Install AWS Nitro Enclave kernel
+      - run: sudo mkdir -p /usr/share/nitro_enclaves/blobs
+      - name: Install Nitro CLI
+        if: steps.nitro-kernel-cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap.git
           cd aws-nitro-enclaves-sdk-bootstrap
@@ -98,14 +127,18 @@ jobs:
           docker cp extract_blobs:/blobs ./blobs
           docker rm extract_blobs
 
-          sudo mkdir -p /usr/share/nitro_enclaves/blobs
           sudo cp blobs/* /usr/share/nitro_enclaves/blobs
+          sudo cp blobs/*  ~/nitro-kernel-cache
 
           cd ..
           rm -rf aws-nitro-enclaves-sdk-bootstrap
           docker system prune -f
           docker rmi blobs_all:latest
-          
+
+      - if: steps.nitro-kernel-cache.outputs.cache-hit == 'true'
+        run: sudo cp ~/nitro-kernel-cache/* /usr/share/nitro_enclaves/blobs
+
+
       # Check out the code
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -129,10 +162,6 @@ jobs:
       - name: Create EIF
         run: |
           nitro-cli build-enclave --docker-uri nitro-node-enclave:latest --output-file output/nitro.eif
-
-      # Log in to GitHub Container Registry
-      - name: Log In to GitHub Container Registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
 
       # Build and push the enclave Docker image
       - name: Build and Push Enclave Docker Image
