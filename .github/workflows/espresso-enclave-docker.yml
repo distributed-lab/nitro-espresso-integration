@@ -1,10 +1,7 @@
-name: Build K8s-ready container with eif
+name: Build K8s-ready container with AWS Nitro Enclave .eif
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-    - '**'
 
 permissions:
   contents: write
