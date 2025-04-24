@@ -45,8 +45,8 @@ FROM wasm-base AS wasm-libs-builder
 	# clang / lld used by soft-float wasm
 RUN apt-get update && \
     apt-get install -y clang=1:14.0-55.7~deb12u1 lld=1:14.0-55.7~deb12u1 wabt
-    # pinned rust 1.81.0
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.81.0 --target x86_64-unknown-linux-gnu wasm32-unknown-unknown wasm32-wasi
+# pinned rust 1.81.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.81.0 --target x86_64-unknown-linux-gnu,wasm32-unknown-unknown,wasm32-wasip1
 COPY ./Makefile ./
 COPY arbitrator/Cargo.* arbitrator/
 COPY arbitrator/arbutil arbitrator/arbutil
@@ -57,6 +57,7 @@ COPY arbitrator/wasm-libraries arbitrator/wasm-libraries
 COPY arbitrator/tools/wasmer arbitrator/tools/wasmer
 COPY brotli brotli
 COPY scripts/build-brotli.sh scripts/
+COPY scripts/remove_reference_types.sh scripts/
 COPY --from=brotli-wasm-export / target/
 RUN apt-get update && apt-get install -y cmake
 RUN . ~/.cargo/env && NITRO_BUILD_IGNORE_TIMESTAMPS=1 RUSTFLAGS='-C symbol-mangling-version=v0' make build-wasm-libs
@@ -65,6 +66,7 @@ FROM scratch AS wasm-libs-export
 COPY --from=wasm-libs-builder /workspace/ /
 
 FROM wasm-base AS wasm-bin-builder
+RUN apt-get update && apt-get install -y wabt
 # pinned go version
 RUN curl -L https://golang.org/dl/go1.23.1.linux-`dpkg --print-architecture`.tar.gz | tar -C /usr/local -xzf -
 COPY ./Makefile ./go.mod ./go.sum ./
@@ -88,6 +90,7 @@ COPY ./safe-smart-account ./safe-smart-account
 COPY ./solgen/gen.go ./solgen/
 COPY ./fastcache ./fastcache
 COPY ./go-ethereum ./go-ethereum
+COPY scripts/remove_reference_types.sh scripts/
 COPY --from=brotli-wasm-export / target/
 COPY --from=contracts-builder workspace/contracts/build/contracts/src/precompiles/ contracts/build/contracts/src/precompiles/
 COPY --from=contracts-builder workspace/contracts/node_modules/@offchainlabs/upgrade-executor/build/contracts/src/UpgradeExecutor.sol/UpgradeExecutor.json contracts/
@@ -107,7 +110,7 @@ RUN NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-aws-nsm-lib
 FROM scratch AS nsmlib-export
 COPY --from=nsmlib-builder /workspace/target/ /
 
-FROM rust:1.81.0-slim-bookworm AS prover-header-builder
+FROM rust:1.83.0-slim-bookworm AS prover-header-builder
 WORKDIR /workspace
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
@@ -131,7 +134,13 @@ COPY brotli brotli
 RUN apt-get update && apt-get install -y cmake
 RUN NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-prover-header
 
-RUN apt-get install -y libssl-dev pkg-config
+RUN apt-get update && \
+    apt-get install -y \
+    libssl-dev \
+    pkg-config \
+    perl \
+    perl-modules-5.36 \
+    libfindbin-libs-perl
 RUN NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-espresso-crypto-lib
 
 FROM scratch AS prover-header-export
@@ -237,7 +246,7 @@ RUN ./download-machine.sh consensus-v30 0xb0de9cb89e4d944ae6023a3b62276e54804c24
 RUN ./download-machine.sh consensus-v31 0x260f5fa5c3176a856893642e149cf128b5a8de9f828afec8d11184415dd8dc69
 RUN ./download-machine.sh consensus-v32 0x184884e1eb9fefdc158f6c8ac912bb183bf3cf83f0090317e0bc4ac5860baa39
 
-FROM golang:1.23.1-bookworm AS node-builder
+FROM golang:1.23.4-bookworm AS node-builder
 WORKDIR /workspace
 ARG version=""
 ARG datetime=""
@@ -245,6 +254,13 @@ ARG modified=""
 ENV NITRO_VERSION=$version
 ENV NITRO_DATETIME=$datetime
 ENV NITRO_MODIFIED=$modified
+
+# Install Rust and build dependencies
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN apt-get update && \
+    apt-get install -y wabt pkg-config libssl-dev && \
+    apt-get clean
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y wabt
@@ -279,6 +295,8 @@ ENTRYPOINT [ "/usr/local/bin/fuzz.bash", "FuzzStateTransition", "--binary-path",
 
 FROM debian:bookworm-slim AS nitro-node-slim
 WORKDIR /home/user
+COPY --from=node-builder /workspace/target/lib/libespresso_crypto_helper.so /usr/local/lib/
+RUN ldconfig
 COPY --from=node-builder /workspace/target/bin/nitro /usr/local/bin/
 COPY --from=node-builder /workspace/target/bin/relay /usr/local/bin/
 COPY --from=node-builder /workspace/target/bin/nitro-val /usr/local/bin/
@@ -316,6 +334,8 @@ FROM nitro-node-slim AS nitro-node
 USER root
 COPY --from=prover-export /bin/jit                        /usr/local/bin/
 COPY --from=node-builder  /workspace/target/bin/daserver  /usr/local/bin/
+COPY --from=node-builder  /workspace/target/bin/autonomous-auctioneer  /usr/local/bin/
+COPY --from=node-builder  /workspace/target/bin/bidder-client  /usr/local/bin/
 COPY --from=node-builder  /workspace/target/bin/datool    /usr/local/bin/
 COPY --from=nitro-legacy /home/user/target/machines /home/user/nitro-legacy/machines
 RUN rm -rf /workspace/target/legacy-machines/latest
@@ -351,6 +371,7 @@ RUN rm -f /home/user/target/machines/latest
 COPY --from=prover-export /bin/jit                                         /usr/local/bin/
 COPY --from=node-builder  /workspace/target/bin/deploy                     /usr/local/bin/
 COPY --from=node-builder  /workspace/target/bin/seq-coordinator-invalidate /usr/local/bin/
+COPY --from=node-builder  /workspace/target/bin/mockexternalsigner        /usr/local/bin/
 COPY --from=module-root-calc /workspace/target/machines/latest/machine.wavm.br /home/user/target/machines/latest/
 COPY --from=module-root-calc /workspace/target/machines/latest/until-host-io-state.bin /home/user/target/machines/latest/
 COPY --from=module-root-calc /workspace/target/machines/latest/module-root.txt /home/user/target/machines/latest/

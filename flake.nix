@@ -7,8 +7,9 @@
   inputs.flake-compat.flake = false;
   inputs.rust-overlay.url = "github:oxalica/rust-overlay";
   inputs.foundry.url = "github:shazow/foundry.nix/monthly";
+  inputs.pre-commit-hooks.url = "github:cachix/pre-commit-hooks.nix";
 
-  outputs = { flake-utils, nixpkgs, foundry, rust-overlay, ... }:
+  outputs = { self, flake-utils, nixpkgs, foundry, rust-overlay, pre-commit-hooks, ... }:
     let
       goVersion = 23; # Change this to update the whole stack
       overlays = [
@@ -29,13 +30,13 @@
         pkgs = import nixpkgs {
           inherit overlays system;
         };
-        stableToolchain = pkgs.rust-bin.stable."1.81.0".minimal.override {
+        stableToolchain = pkgs.rust-bin.stable."1.85.0".minimal.override {
           extensions = [ "rustfmt" "clippy" "llvm-tools-preview" "rust-src" ];
-          targets = [ "wasm32-unknown-unknown" "wasm32-wasi" ];
+          targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
         };
-        nightlyToolchain = pkgs.rust-bin.nightly."2024-10-06".minimal.override {
+        nightlyToolchain = pkgs.rust-bin.nightly."2024-12-17".minimal.override {
           extensions = [ "rust-src" ];
-          targets = [ "wasm32-unknown-unknown" "wasm32-wasi" ];
+          targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
         };
         # A script that calls nightly cargo if invoked with `+nightly`
         # as the first argument, otherwise it calls stable cargo.
@@ -66,7 +67,20 @@
           test -f $HOME/.docker/cli-plugins/docker-buildx || ln -sn $(which docker-buildx) $HOME/.docker/cli-plugins
         '';
       in
-      {
+      with pkgs; {
+        checks = {
+          pre-commit-check = pre-commit-hooks.lib.${system}.run {
+            src = ./.;
+            hooks = {
+              golangci-lint = {
+                enable = true;
+                entry = "golangci-lint run --new-from-rev=HEAD --fix";
+                pass_filenames = false;
+                types = [ "go" ];
+              };
+            };
+          };
+        };
         devShells =
           {
             # This shell is only used for one make recipe because the other
@@ -145,6 +159,9 @@
                 rust-cbindgen
                 wabt
 
+                # for dynamic linking
+                curl
+
                 # Docker
                 docker-compose # provides the `docker-compose` command
                 docker-buildx
@@ -154,6 +171,8 @@
 
                 # provides abigen
                 go-ethereum
+
+                pre-commit
               ] ++ lib.optionals stdenv.isDarwin [
                 apple-sdk_11
               ] ++ lib.optionals (! stdenv.isDarwin) [
@@ -175,7 +194,8 @@
                 + pkgs.lib.optionalString pkgs.stdenv.isDarwin
                 ''
                   export NIX_LDFLAGS="-framework SystemConfiguration $NIX_LDFLAGS"
-                '';
+                ''
+                + self.checks.${system}.pre-commit-check.shellHook;
             };
           };
       });

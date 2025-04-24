@@ -2,6 +2,7 @@ package arbtest
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -9,7 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 )
 
-func createCaffNode(t *testing.T, builder *NodeBuilder) (*TestClient, func()) {
+func createCaffNode(ctx context.Context, t *testing.T, existing *NodeBuilder) (*TestClient, func()) {
+	builder := NewNodeBuilder(ctx).DefaultConfig(t, false)
 	nodeConfig := builder.nodeConfig
 	execConfig := builder.execConfig
 
@@ -18,20 +20,24 @@ func createCaffNode(t *testing.T, builder *NodeBuilder) (*TestClient, func()) {
 	nodeConfig.BlockValidator.Enable = false
 	nodeConfig.DelayedSequencer.Enable = false
 	nodeConfig.DelayedSequencer.FinalizeDistance = 1
-	nodeConfig.Sequencer = true
+	nodeConfig.Sequencer = false
 	nodeConfig.Dangerous.NoSequencerCoordinator = true
-	execConfig.Sequencer.Enable = true
+	execConfig.Sequencer.Enable = false
 	execConfig.Sequencer.EnableCaffNode = true
+	execConfig.ForwardingTarget = existing.l2StackConfig.IPCPath
+	execConfig.SecondaryForwardingTarget = []string{}
 	execConfig.Sequencer.CaffNodeConfig.Namespace = builder.chainConfig.ChainID.Uint64()
-	execConfig.Sequencer.CaffNodeConfig.StartBlock = 1
-	execConfig.Sequencer.CaffNodeConfig.HotShotUrl = hotShotUrl
-	execConfig.Sequencer.CaffNodeConfig.RetryInterval = time.Second * 1
-	execConfig.Sequencer.CaffNodeConfig.HotshotPollingInterval = 250 * time.Millisecond
-	nodeConfig.ParentChainReader.Enable = false
-	return builder.Build2ndNode(t, &SecondNodeParams{
-		nodeConfig: nodeConfig,
-		execConfig: execConfig,
-	})
+	execConfig.Sequencer.CaffNodeConfig.NextHotshotBlock = 1
+	execConfig.Sequencer.CaffNodeConfig.ParentChainNodeUrl = "http://0.0.0.0:8545"
+	execConfig.Sequencer.CaffNodeConfig.EspressoTEEVerifierAddr = existing.L1Info.GetAddress("EspressoTEEVerifierMock").Hex()
+	execConfig.Sequencer.CaffNodeConfig.ParentChainReader.Enable = true
+	execConfig.Sequencer.CaffNodeConfig.ParentChainReader.UseFinalityData = true
+	execConfig.Sequencer.CaffNodeConfig.RecordPerformance = true
+	execConfig.Sequencer.CaffNodeConfig.HotShotUrls = []string{hotShotUrl, hotShotUrl, hotShotUrl, hotShotUrl}
+	execConfig.Sequencer.CaffNodeConfig.FallbackUrls = []string{hotShotUrl, hotShotUrl, hotShotUrl, hotShotUrl}
+
+	cleanup := builder.BuildEspressoCaffNode(t)
+	return builder.L2, cleanup
 }
 
 func TestEspressoCaffNode(t *testing.T) {
@@ -79,7 +85,7 @@ func TestEspressoCaffNode(t *testing.T) {
 
 	log.Info("Starting the caff node")
 	// start the node
-	builderCaffNode, cleanupCaffNode := createCaffNode(t, builder)
+	builderCaffNode, cleanupCaffNode := createCaffNode(ctx, t, builder)
 	defer cleanupCaffNode()
 
 	err = waitForWith(ctx, 10*time.Minute, 10*time.Second, func() bool {
@@ -92,6 +98,9 @@ func TestEspressoCaffNode(t *testing.T) {
 	err = waitForWith(ctx, 240*time.Second, 10*time.Second, func() bool {
 		balance := builderCaffNode.GetBalance(t, addr)
 		log.Info("waiting for balance", "account", newAccount, "addr", addr, "balance", balance)
+		if balance.Cmp(transferAmount) >= 0 {
+			log.Info("Balance has entered account", "balance", balance, "account", newAccount)
+		}
 		return balance.Cmp(transferAmount) >= 0
 	})
 	Require(t, err)
@@ -108,11 +117,14 @@ func TestEspressoCaffNode(t *testing.T) {
 			t.Fatal("last block is nil")
 		}
 		log.Info("last block", "lastBlock", lastBlock)
-		number, ok := lastBlock["number"].(string)
+		numberString, ok := lastBlock["number"].(string)
 		if !ok {
 			t.Fatal("number is not a string")
 		}
-		if number == "0x2" || number == "0x3" {
+		// convert number to uint
+		number, err := strconv.ParseInt(numberString, 0, 64)
+		Require(t, err)
+		if number >= 3 {
 			break
 		}
 		if time.Since(startTime) > 10*time.Minute {
@@ -120,4 +132,8 @@ func TestEspressoCaffNode(t *testing.T) {
 		}
 		time.Sleep(time.Second * 5)
 	}
+
+	// Send transaction to CaffNode and it should works later
+	err = checkTransferTxOnL2(t, ctx, builderCaffNode, "User17", builder.L2Info)
+	Require(t, err)
 }

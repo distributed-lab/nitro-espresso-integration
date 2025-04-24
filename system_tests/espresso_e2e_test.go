@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	lightclient "github.com/EspressoSystems/espresso-sequencer-go/light-client"
+	lightclient "github.com/EspressoSystems/espresso-network-go/light-client"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -134,7 +134,7 @@ func waitForWith(
 }
 
 func waitForEspressoNode(ctx context.Context) error {
-	return waitForWith(ctx, 400*time.Second, 1*time.Second, func() bool {
+	return waitForWith(ctx, 3*time.Minute, 1*time.Second, func() bool {
 		out, err := exec.Command("curl", "http://localhost:20000/api/dev-info", "-L").Output()
 		if err != nil {
 			log.Warn("retry to check the espresso dev node", "err", err)
@@ -164,6 +164,7 @@ func waitForL1Node(ctx context.Context) error {
 			"{'jsonrpc':'2.0','id':45678,'method':'eth_chainId','params':[]}",
 			"http://localhost:8545",
 		).Run(); e != nil {
+			log.Warn("retry to check the l1 node", "err", e)
 			return false
 		}
 		return true
@@ -189,7 +190,8 @@ func TestEspressoE2E(t *testing.T) {
 	err := waitForL1Node(ctx)
 	Require(t, err)
 
-	runEspresso()
+	shutdown := runEspresso()
+	defer shutdown()
 
 	// wait for the builder
 	err = waitForEspressoNode(ctx)
@@ -290,24 +292,57 @@ func TestEspressoE2E(t *testing.T) {
 	// but shut down before it can be finalized
 	time.Sleep(1 * time.Second)
 
-	// Shutdown the espresso node
-	shutdownEspressoWithoutRemovingVolumes := func() {
-		p := exec.Command("docker", "compose", "down")
+	log.Info("Pausing espresso node")
+	pauseEspresso := func() {
+		p := exec.Command("docker", "compose", "pause")
 		p.Dir = workingDir
 		err := p.Run()
 		if err != nil {
 			panic(err)
 		}
-	}
-	// Note: It's important not to remove the volumes because otherwise namespace proof validations will fail
-	shutdownEspressoWithoutRemovingVolumes()
+		// Disconnect the container from the network to ensure requests to the dev node
+		// don't just hang but actually fail.
+		p = exec.Command(
+			"docker",
+			"network",
+			"disconnect",
+			"espresso-e2e_default",
+			"espresso-e2e-espresso-dev-node-1",
+		)
+		err = p.Run()
+		if err != nil {
+			panic(err)
+		}
 
-	// Wait for a 1 minute before restarting the espresso node
+	}
+	pauseEspresso()
+
+	log.Info("Waiting for 1 minute before resuming espresso node")
 	time.Sleep(1 * time.Minute)
 
-	// Restart the espresso node
-	cleanEspresso := runEspresso()
-	defer cleanEspresso()
+	log.Info("Resuming espresso node")
+	unpauseEspresso := func() {
+		// reconnect the network first
+		p := exec.Command(
+			"docker",
+			"network",
+			"connect",
+			"espresso-e2e_default",
+			"espresso-e2e-espresso-dev-node-1",
+		)
+		err := p.Run()
+		if err != nil {
+			panic(err)
+		}
+		// resume the dev node
+		p = exec.Command("docker", "compose", "unpause")
+		p.Dir = workingDir
+		err = p.Run()
+		if err != nil {
+			panic(err)
+		}
+	}
+	unpauseEspresso()
 
 	err = waitForEspressoNode(ctx)
 	Require(t, err)
@@ -359,7 +394,8 @@ func checkTransferTxOnL2(
 		log.Info("waiting for balance", "account", account, "addr", addr, "balance", balance)
 		if balance.Cmp(transferAmount) >= 0 {
 			log.Info("target balance reached", "account", account, "addr", addr, "balance", balance)
+			return true
 		}
-		return true
+		return false
 	})
 }

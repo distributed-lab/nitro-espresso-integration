@@ -3,21 +3,25 @@ package gethexec
 import (
 	"context"
 	"fmt"
-	"sort"
-	"sync"
 	"time"
 
-	espressoClient "github.com/EspressoSystems/espresso-sequencer-go/client"
+	espressoClient "github.com/EspressoSystems/espresso-network-go/client"
 
 	"github.com/ethereum/go-ethereum/arbitrum_types"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/node"
 
 	"github.com/offchainlabs/nitro/arbos"
-	"github.com/offchainlabs/nitro/arbos/arbostypes"
-	"github.com/offchainlabs/nitro/arbutil"
+	"github.com/offchainlabs/nitro/espressostreamer"
+	"github.com/offchainlabs/nitro/solgen/go/bridgegen"
+	"github.com/offchainlabs/nitro/solgen/go/precompilesgen"
+	"github.com/offchainlabs/nitro/timeboost"
+	"github.com/offchainlabs/nitro/util/headerreader"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
 )
 
@@ -27,37 +31,89 @@ Caff Node creates blocks with finalized hotshot transactions
 type CaffNode struct {
 	stopwaiter.StopWaiter
 
-	config                  SequencerConfigFetcher
-	namespace               uint64
-	executionEngine         *ExecutionEngine
-	espressoClient          *espressoClient.Client
-	nextHotshotBlockNum     uint64
-	messagesWithMetadata    []*arbostypes.MessageWithMetadata
-	messagesWithMetadataPos []uint64
-	messagesStateMutex      sync.Mutex
-	skippedBlockPos         *uint64
-	retryInterval           time.Duration
-	hotshotPollingInterval  time.Duration
+	config           SequencerConfigFetcher
+	executionEngine  *ExecutionEngine
+	espressoStreamer *espressostreamer.EspressoStreamer
+	txForwarder      TransactionPublisher
+
+	db ethdb.Database
 }
 
-func NewCaffNode(configFetcher SequencerConfigFetcher, execEngine *ExecutionEngine) *CaffNode {
+func NewCaffNode(configFetcher SequencerConfigFetcher, execEngine *ExecutionEngine, txForwarder TransactionPublisher, stack *node.Node) *CaffNode {
 	config := configFetcher()
 	if err := config.Validate(); err != nil {
 		log.Crit("Failed to validate caff  node config", "err", err)
 	}
+
+	l1Client, err := ethclient.Dial(config.CaffNodeConfig.ParentChainNodeUrl)
+	if err != nil {
+		log.Crit("Failed to create l1 client", "url", config.CaffNodeConfig.ParentChainNodeUrl)
+		return nil
+	}
+
+	arbSys, err := precompilesgen.NewArbSys(types.ArbSysAddress, l1Client)
+	if err != nil {
+		log.Crit("Failed to create arbsys", "err", err)
+		return nil
+	}
+
+	// we initialze a l1 reader that will poll for header every 60 seconds
+	l1Reader, err := headerreader.New(context.Background(), l1Client, func() *headerreader.Config {
+		return &config.CaffNodeConfig.ParentChainReader
+	}, arbSys)
+
+	if err != nil {
+		log.Crit("Failed to create l1 reader", "err", err)
+		return nil
+	}
+
+	if !common.IsHexAddress(config.CaffNodeConfig.EspressoTEEVerifierAddr) {
+		log.Crit("Invalid EspressoTEEVerifierAddress provided")
+		return nil
+	}
+
+	espressoTEEVerifierCaller, err := bridgegen.NewEspressoTEEVerifier(
+		common.HexToAddress(config.CaffNodeConfig.EspressoTEEVerifierAddr),
+		l1Reader.Client())
+
+	if err != nil || espressoTEEVerifierCaller == nil {
+		log.Crit("failed to create espressoTEEVerifierCaller", "err", err)
+		return nil
+	}
+
+	if execEngine.bc == nil {
+		log.Crit("execution engine bc not initialized")
+		return nil
+	}
+
+	db, err := stack.OpenDatabase("caffdata", 0, 0, "caffdata/", false)
+	if err != nil {
+		log.Crit("could not open the caff database")
+		return nil
+	}
+
+	espressoStreamer := espressostreamer.NewEspressoStreamer(config.CaffNodeConfig.Namespace,
+		config.CaffNodeConfig.NextHotshotBlock,
+		config.CaffNodeConfig.RetryTime,
+		config.CaffNodeConfig.HotshotPollingInterval,
+		espressoTEEVerifierCaller,
+		espressoClient.NewMultipleNodesClient(config.CaffNodeConfig.HotShotUrls, config.CaffNodeConfig.FallbackUrls),
+		config.CaffNodeConfig.RecordPerformance,
+	)
+
+	if espressoStreamer == nil {
+		log.Crit("Failed to create espresso streamer")
+	}
+
 	return &CaffNode{
-		config:                 configFetcher,
-		namespace:              config.CaffNodeConfig.Namespace,
-		espressoClient:         espressoClient.NewClient(config.CaffNodeConfig.HotShotUrl),
-		nextHotshotBlockNum:    config.CaffNodeConfig.StartBlock,
-		executionEngine:        execEngine,
-		retryInterval:          config.CaffNodeConfig.RetryInterval,
-		hotshotPollingInterval: config.CaffNodeConfig.HotshotPollingInterval,
+		config:           configFetcher,
+		executionEngine:  execEngine,
+		espressoStreamer: espressoStreamer,
+		txForwarder:      txForwarder,
+		db:               db,
 	}
 }
 
-// TODO: For future versions, we should check the attestation quote to check if its from a valid TEE
-// TODO: This machine should run in TEE and submit blocks to espresso only if the block is valid with an attestation.
 /**
  * This function will create a block with the finalized hotshot transactions
  * It will first remove duplicates and ensure the ordering of messages is correct
@@ -65,58 +121,29 @@ func NewCaffNode(configFetcher SequencerConfigFetcher, execEngine *ExecutionEngi
  */
 func (n *CaffNode) createBlock() (returnValue bool) {
 
-	n.messagesStateMutex.Lock()
-	defer n.messagesStateMutex.Unlock()
-
-	//  If we have no messages to process, return
-	if len(n.messagesWithMetadata) == 0 {
-		return false
-	}
-	messageWithMetadata := n.messagesWithMetadata[0]
-	messageWithMetadataPos := n.messagesWithMetadataPos[0]
-
-	// Get the last block header stored in the database
-	if n.executionEngine.bc == nil {
-		log.Error("execution engine bc not initialized")
-		return false
-	}
-
 	lastBlockHeader := n.executionEngine.bc.CurrentBlock()
 
-	currentMsgPos, err := n.executionEngine.BlockNumberToMessageIndex(lastBlockHeader.Number.Uint64())
+	messageWithMetadataAndPos, err := n.espressoStreamer.Next()
 	if err != nil {
-		log.Error("failed to convert block number to message index")
-		return false
-	}
-	currentPos := uint64(currentMsgPos)
-
-	// Check for duplicates and remove them
-	if messageWithMetadataPos <= currentPos {
-		log.Error("message has already been processed, removing duplicate",
-			"messageWithMetadataPos", messageWithMetadataPos, "currentMessageCount", currentPos)
-		n.messagesWithMetadata = n.messagesWithMetadata[1:]
-		n.messagesWithMetadataPos = n.messagesWithMetadataPos[1:]
+		log.Warn("unable to get next message", "err", err)
 		return false
 	}
 
-	// Check if the message is in the correct order, it should be sequentially increasing
-	if (messageWithMetadataPos != currentPos+1) && n.skippedBlockPos == nil {
-		log.Error("order of message is incorrect", "currentPos", currentPos,
-			"messageWithMetadataPos", messageWithMetadataPos)
+	if messageWithMetadataAndPos == nil {
+		log.Debug("no message found")
 		return false
 	}
 
-	// If a message was skipped, check if the message is in the correct order
-	if n.skippedBlockPos != nil && messageWithMetadataPos != *n.skippedBlockPos+1 {
-		log.Error("order of message is incorrect", "skippedBlockPos", *n.skippedBlockPos,
-			"messageWithMetadataPos", messageWithMetadataPos)
-		return false
-	}
+	messageWithMetadata := messageWithMetadataAndPos.MessageWithMeta
 
 	// Get the state of the database at the last block
 	statedb, err := n.executionEngine.bc.StateAt(lastBlockHeader.Root)
 	if err != nil {
 		log.Error("failed to get state at last block header", "err", err)
+		log.Debug("Resetting espresso streamer", "currentMessagePos",
+			messageWithMetadataAndPos.Pos, "currentHostshotBlock",
+			messageWithMetadataAndPos.HotshotHeight)
+		n.espressoStreamer.Reset(messageWithMetadataAndPos.Pos, messageWithMetadataAndPos.HotshotHeight)
 		return false
 	}
 
@@ -134,29 +161,14 @@ func (n *CaffNode) createBlock() (returnValue bool) {
 		false,
 		core.MessageReplayMode)
 
-	if err != nil {
+	if err != nil || block == nil {
 		log.Error("Failed to produce block", "err", err)
-		// if we fail to produce a block, we should remove this message from the queue
-		// and set skippedBlockPos to the current messageWithMetadataPos
-		n.skippedBlockPos = &messageWithMetadataPos
-		n.messagesWithMetadata = n.messagesWithMetadata[1:]
-		n.messagesWithMetadataPos = n.messagesWithMetadataPos[1:]
+		log.Debug("Resetting espresso streamer", "currentMessagePos",
+			messageWithMetadataAndPos.Pos, "currentHostshotBlock",
+			messageWithMetadataAndPos.HotshotHeight)
+		n.espressoStreamer.Reset(messageWithMetadataAndPos.Pos, messageWithMetadataAndPos.HotshotHeight)
 		return false
 	}
-
-	// If block is nil or receipts is empty, return false
-	if len(receipts) == 0 || block == nil {
-		log.Error("Failed to produce block, no receipts or block")
-		// if we fail to produce a block, we should remove this message from the queue
-		// and set skippedBlockPos to the current messageWithMetadataPos
-		n.skippedBlockPos = &messageWithMetadataPos
-		n.messagesWithMetadata = n.messagesWithMetadata[1:]
-		n.messagesWithMetadataPos = n.messagesWithMetadataPos[1:]
-		return false
-	}
-
-	// Reset the skippedBlockPos
-	n.skippedBlockPos = nil
 
 	blockCalcTime := time.Since(startTime)
 
@@ -165,119 +177,89 @@ func (n *CaffNode) createBlock() (returnValue bool) {
 	err = n.executionEngine.appendBlock(block, statedb, receipts, blockCalcTime)
 	if err != nil {
 		log.Error("Failed to append block", "err", err)
+		log.Debug("Resetting espresso streamer", "currentMessagePos",
+			messageWithMetadataAndPos.Pos, "currentHostshotBlock",
+			messageWithMetadataAndPos.HotshotHeight)
+		n.espressoStreamer.Reset(messageWithMetadataAndPos.Pos, messageWithMetadataAndPos.HotshotHeight)
 		return false
 	}
 
-	// Pop the message from the front of the queue at the end.
-	n.messagesWithMetadata = n.messagesWithMetadata[1:]
-	n.messagesWithMetadataPos = n.messagesWithMetadataPos[1:]
+	n.espressoStreamer.RecordTimeDurationBetweenHotshotAndCurrentBlock(messageWithMetadataAndPos.HotshotHeight, time.Now())
+
+	err = n.espressoStreamer.StoreHotshotBlock(n.db, messageWithMetadataAndPos.HotshotHeight)
+	if err != nil {
+		log.Error("Failed to store hotshot block", "err", err)
+		log.Debug("Resetting espresso streamer", "currentMessagePos",
+			messageWithMetadataAndPos.Pos, "currentHostshotBlock",
+			messageWithMetadataAndPos.HotshotHeight)
+		n.espressoStreamer.Reset(messageWithMetadataAndPos.Pos, messageWithMetadataAndPos.HotshotHeight)
+		return false
+	}
 
 	return true
 }
 
-/**
-* This function will create a queue of messages from the hotshot to be processed by the node
-* It will sort the messages by the message index
-* and store the messages in `messagesWithMetadata` queue
- */
-func (n *CaffNode) queueMessagesFromHotshot(ctx context.Context) error {
-	if n.nextHotshotBlockNum == 0 {
-		latestBlock, err := n.espressoClient.FetchLatestBlockHeight(ctx)
-		if err != nil {
-			log.Warn("unable to fetch latest hotshot block", "err", err)
-			return err
-		}
-		log.Info("Started node at the latest hotshot block", "block number", latestBlock)
-		n.nextHotshotBlockNum = latestBlock
-	}
-
-	nextHotshotBlockNum := n.nextHotshotBlockNum
-	header, err := n.espressoClient.FetchHeaderByHeight(ctx, nextHotshotBlockNum)
+func (n *CaffNode) Start(ctx context.Context) error {
+	n.StopWaiter.Start(ctx, n)
+	err := n.espressoStreamer.Start(ctx)
 	if err != nil {
-		log.Warn("failed to fetch header", "err", err)
-		return err
+		return fmt.Errorf("failed to start espresso streamer: %w", err)
 	}
-	height := header.Header.GetBlockHeight()
-	arbTxns, err := n.espressoClient.FetchTransactionsInBlock(ctx, height, n.namespace)
+	// This is +1 because the current block is the block after the last processed block
+	currentBlockNum := n.executionEngine.bc.CurrentBlock().Number.Uint64() + 1
+	currentMessagePos, err := n.executionEngine.BlockNumberToMessageIndex(currentBlockNum)
 	if err != nil {
-		log.Warn("failed to fetch transactions", "err", err)
-		return err
+		return fmt.Errorf("failed to convert block number to message index: %w", err)
 	}
-	if len(arbTxns.Transactions) == 0 {
+	nextHotshotBlock, err := n.espressoStreamer.ReadNextHotshotBlockFromDb(n.db)
+	if err != nil {
+		log.Crit("failed to read  next hotshot block", "err", err)
 		return nil
 	}
 
-	n.messagesStateMutex.Lock()
-	defer n.messagesStateMutex.Unlock()
-	for _, tx := range arbTxns.Transactions {
-		// Parse hotshot payload
-		_, indices, messages, err := arbutil.ParseHotShotPayload(tx)
-		if err != nil {
-			log.Warn("failed to parse hotshot payload, will retry", "err", err)
-			return err
-		}
-		// Parse the messages
-		for i, message := range messages {
-			var messageWithMetadata arbostypes.MessageWithMetadata
-			err = rlp.DecodeBytes(message, &messageWithMetadata)
-			if err != nil {
-				log.Warn("failed to decode message, will retry", "err", err)
-				return err
-			}
-			n.messagesWithMetadata = append(n.messagesWithMetadata, &messageWithMetadata)
-			n.messagesWithMetadataPos = append(n.messagesWithMetadataPos, indices[i])
-
+	if nextHotshotBlock == 0 {
+		// No next hotshot block found, so we need to start from config.CaffNodeConfig.NextHotshotBlock
+		nextHotshotBlock = n.config().CaffNodeConfig.NextHotshotBlock
+		if nextHotshotBlock == 0 {
+			log.Crit("No next hotshot block found in database, and no config.CaffNodeConfig.NextHotshotBlock set")
 		}
 	}
-	// Sort the messagesWithMetadata and messagesWithMetadataPos based on ascending order
-	// This is to ensure that we process messages in the correct order
-	sort.SliceStable(n.messagesWithMetadata, func(i, j int) bool {
-		return n.messagesWithMetadataPos[i] < n.messagesWithMetadataPos[j]
-	})
-	sort.SliceStable(n.messagesWithMetadataPos, func(i, j int) bool {
-		return n.messagesWithMetadataPos[i] < n.messagesWithMetadataPos[j]
-	})
-
-	return nil
-}
-
-func (n *CaffNode) Start(ctx context.Context) error {
-	n.StopWaiter.Start(ctx, n)
-
-	err := n.CallIterativelySafe(func(ctx context.Context) time.Duration {
-		err := n.queueMessagesFromHotshot(ctx)
-		if err != nil {
-			return n.retryInterval
-		}
-		n.nextHotshotBlockNum += 1
-		log.Info("Now processing hotshot block", "block", n.nextHotshotBlockNum)
-		return n.hotshotPollingInterval
-	})
-	if err != nil {
-		return fmt.Errorf("failed to start  node, error in queueMessagesFromHotshot: %w", err)
-	}
+	// The reason we do the reset here is because database is only initialized after Caff node is initialized
+	// so if we want to read the current position from the database, we need to reset the streamer
+	// during the start of the espresso streamer and caff node
+	log.Debug("Starting streamer at", "nextHotshotBlock", nextHotshotBlock, "currentMessagePos", currentMessagePos)
+	n.espressoStreamer.Reset(uint64(currentMessagePos), nextHotshotBlock)
 
 	err = n.CallIterativelySafe(func(ctx context.Context) time.Duration {
 		madeBlock := n.createBlock()
 		if madeBlock {
-			return n.hotshotPollingInterval
+			return n.config().CaffNodeConfig.HotshotPollingInterval
 		}
-		return n.retryInterval
+		return n.config().CaffNodeConfig.RetryTime
 	})
 	if err != nil {
 		return fmt.Errorf("failed to start node, error in createBlock: %w", err)
 	}
+
 	return nil
+}
+
+func (n *CaffNode) PublishAuctionResolutionTransaction(ctx context.Context, tx *types.Transaction) error {
+	return n.txForwarder.PublishAuctionResolutionTransaction(ctx, tx)
+}
+
+func (n *CaffNode) PublishExpressLaneTransaction(ctx context.Context, msg *timeboost.ExpressLaneSubmission) error {
+	return n.txForwarder.PublishExpressLaneTransaction(ctx, msg)
 }
 
 func (n *CaffNode) PublishTransaction(ctx context.Context, tx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
-	return nil
+	return n.txForwarder.PublishTransaction(ctx, tx, options)
 }
 
 func (n *CaffNode) CheckHealth(ctx context.Context) error {
-	return nil
+	return n.txForwarder.CheckHealth(ctx)
 }
 
 func (n *CaffNode) Initialize(ctx context.Context) error {
-	return nil
+	return n.txForwarder.Initialize(ctx)
 }

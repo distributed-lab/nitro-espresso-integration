@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	lightclient "github.com/EspressoSystems/espresso-sequencer-go/light-client"
+	lightclient "github.com/EspressoSystems/espresso-network-go/light-client"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -18,7 +18,6 @@ func createL1AndL2Node(
 	delayedSequencer bool,
 ) (*NodeBuilder, func()) {
 	builder := NewNodeBuilder(ctx).DefaultConfig(t, true)
-	builder.useL1StackConfig = true // Do not overwrite the L1 stack config when building
 	builder.l1StackConfig.HTTPPort = 8545
 	builder.l1StackConfig.WSPort = 8546
 	builder.l1StackConfig.HTTPHost = "0.0.0.0"
@@ -26,6 +25,10 @@ func createL1AndL2Node(
 	builder.l1StackConfig.WSHost = "0.0.0.0"
 	builder.l1StackConfig.DataDir = t.TempDir()
 	builder.l1StackConfig.WSModules = append(builder.l1StackConfig.WSModules, "eth")
+	builder.l2StackConfig.HTTPPort = 8945
+	builder.l2StackConfig.HTTPHost = "0.0.0.0"
+	builder.l2StackConfig.IPCPath = tmpPath(t, "test.ipc")
+	builder.useL1StackConfig = true
 
 	// poster config
 	builder.nodeConfig.BatchPoster.Enable = true
@@ -36,6 +39,8 @@ func createL1AndL2Node(
 	builder.nodeConfig.BatchPoster.MaxDelay = -1000 * time.Hour
 	builder.nodeConfig.BatchPoster.LightClientAddress = lightClientAddress
 	builder.nodeConfig.BatchPoster.HotShotUrl = hotShotUrl
+	// Test that fallbackurl work
+	builder.nodeConfig.BatchPoster.FallBackUrl = hotShotUrl
 	builder.nodeConfig.BatchPoster.UseEscapeHatch = false
 
 	// validator config
@@ -58,7 +63,7 @@ func createL1AndL2Node(
 	mnemonic := "indoor dish desk flag debris potato excuse depart ticket judge file exit"
 	err := builder.L1Info.GenerateAccountWithMnemonic("CommitmentTask", mnemonic, 5)
 	Require(t, err)
-	builder.L1.TransferBalance(t, "Faucet", "CommitmentTask", big.NewInt(9e18), builder.L1Info)
+	builder.L1.TransferBalance(t, "Faucet", "CommitmentTask", new(big.Int).Mul(big.NewInt(9e18), big.NewInt(1000)), builder.L1Info)
 
 	return builder, cleanup
 }
