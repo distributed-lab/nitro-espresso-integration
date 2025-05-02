@@ -238,7 +238,7 @@ func newKMSAttestationConfig() (*KMSAttestationConfig, error) {
 	}
 	derEncodedPublicKey, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("faield to marshal public key PKIX: %w", err)
+		return nil, fmt.Errorf("failed to marshal public key PKIX: %w", err)
 	}
 	kmsAttestationDocRaw, err := nsm.GetAttestationDoc(nil, nil, derEncodedPublicKey)
 	if err != nil {
