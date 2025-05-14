@@ -389,19 +389,6 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
 
 USER user
 
-FROM debian:bookworm-slim AS socat-builder
-RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install -y \
-    wget make gcc
-RUN wget http://www.dest-unreach.org/socat/download/socat-1.7.4.4.tar.gz
-RUN echo "0f8f4b9d5c60b8c53d17b60d79ababc4a0f51b3bb6d2bd3ae8a6a4b9d68f195e socat-1.7.4.4.tar.gz" | sha256sum -c -
-RUN tar -xzf socat-1.7.4.4.tar.gz && \
-    cd socat-1.7.4.4 && \
-    ./configure && \
-    make && \
-    make install
-
 FROM golang:1.23.1-bookworm AS nitro-attestation-cli-builder
 WORKDIR /workspace
 COPY --from=nsmlib-export / target/
@@ -421,9 +408,11 @@ RUN go mod download
 RUN mkdir -p target/bin
 RUN PKG_CONFIG_PATH=/workspace/target/pkgconfig go build -o target/bin/nitro-attestation-cli .
 
+FROM ghcr.io/espressosystems/nitro-espresso-integration/socat:v1.7.4.4 AS socat-export
+
 FROM nitro-node AS nitro-node-enclave
 USER root
-COPY --from=socat-builder /usr/local/bin/socat /usr/local/bin/
+COPY --from=socat-export /socat /usr/local/bin/
 COPY --from=nitro-attestation-cli-builder /workspace/target/bin/nitro-attestation-cli /usr/local/bin/
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
