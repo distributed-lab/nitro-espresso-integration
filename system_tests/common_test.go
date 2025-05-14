@@ -389,6 +389,7 @@ func (b *NodeBuilder) WithDelayBuffer(threshold uint64) *NodeBuilder {
 func (b *NodeBuilder) Build(t *testing.T) func() {
 	b.CheckConfig(t)
 	if b.withL1 {
+		log.Info("Building L1 node")
 		b.BuildL1(t)
 		return b.BuildL2OnL1(t)
 	}
@@ -666,9 +667,12 @@ func (b *NodeBuilder) BuildL2(t *testing.T) func() {
 	return func() { b.L2.cleanup() }
 }
 
-func (b *NodeBuilder) BuildEspressoCaffNode(t *testing.T) func() {
+func (b *NodeBuilder) BuildEspressoCaffNode(t *testing.T, existing *NodeBuilder) (func(), error) {
 	b.L2 = NewTestClient(b.ctx)
 	AddValNodeIfNeeded(t, b.ctx, b.nodeConfig, true, "", b.valnodeConfig.Wasm.RootPath)
+
+	l1Client := existing.L1.Client
+	deployInfo := existing.addresses
 
 	var chainDb ethdb.Database
 	var arbDb ethdb.Database
@@ -680,16 +684,22 @@ func (b *NodeBuilder) BuildEspressoCaffNode(t *testing.T) func() {
 	execConfig := b.execConfig
 	execConfigFetcher := func() *gethexec.Config { return execConfig }
 	execNode, err := gethexec.CreateExecutionNode(b.ctx, b.L2.Stack, chainDb, blockchain, nil, execConfigFetcher)
-	Require(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	fatalErrChan := make(chan error, 10)
 	b.L2.ConsensusNode, err = arbnode.CreateNode(
 		b.ctx, b.L2.Stack, execNode, arbDb, NewFetcherFromConfig(b.nodeConfig), blockchain.Config(),
-		nil, nil, nil, nil, nil, fatalErrChan, big.NewInt(1337), nil)
-	Require(t, err)
+		l1Client, deployInfo, nil, nil, nil, fatalErrChan, big.NewInt(1337), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	err = b.L2.ConsensusNode.Start(b.ctx)
-	Require(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	b.L2.Client = ClientForStack(t, b.L2.Stack)
 
@@ -697,7 +707,7 @@ func (b *NodeBuilder) BuildEspressoCaffNode(t *testing.T) func() {
 
 	b.L2.ExecNode = getExecNode(t, b.L2.ConsensusNode)
 	b.L2.cleanup = func() { b.L2.ConsensusNode.StopAndWait() }
-	return func() { b.L2.cleanup() }
+	return func() { b.L2.cleanup() }, nil
 }
 
 // L2 -Only. RestartL2Node shutdowns the existing l2 node and start it again using the same data dir.
@@ -1254,6 +1264,12 @@ func createTestL1BlockChainWithL1StackConfig(t *testing.T, l1info info, stackCon
 	l1info.GenerateAccount("Faucet")
 
 	chainConfig := chaininfo.ArbitrumDevTestChainConfig()
+	chainConfig.LondonBlock = big.NewInt(0) // EIP-1559
+	cancunTime := uint64(0)
+	chainConfig.CancunTime = &cancunTime
+	// Also ensure Shanghai is activated (prerequisite)
+	shanghaiTime := uint64(0)
+	chainConfig.ShanghaiTime = &shanghaiTime
 	chainConfig.ArbitrumChainParams = params.ArbitrumChainParams{}
 
 	stack, err := node.New(stackConfig)
@@ -1272,7 +1288,6 @@ func createTestL1BlockChainWithL1StackConfig(t *testing.T, l1info info, stackCon
 	nodeConf.Miner.Etherbase = l1info.GetAddress("Faucet")
 	nodeConf.Miner.PendingFeeRecipient = l1info.GetAddress("Faucet")
 	nodeConf.SyncMode = downloader.FullSync
-
 	l1backend, err := eth.New(stack, &nodeConf)
 	Require(t, err)
 
@@ -1422,6 +1437,7 @@ func deployOnParentChain(
 			EspressoTEEVerifier:          espressoTEEVerifierAddress,
 		}
 		wrappedClient := butil.NewBackendWrapper(parentChainReader.Client(), rpc.LatestBlockNumber)
+		log.Info("Deploying Full rollup stack")
 		boldAddresses, err := setup.DeployFullRollupStack(
 			ctx,
 			wrappedClient,
@@ -1494,12 +1510,12 @@ func createNonL1BlockChainWithStackConfig(
 	stack, err := node.New(stackConfig)
 	Require(t, err)
 
-	chainData, err := stack.OpenDatabaseWithExtraOptions("l2chaindata2", 0, 0, "l2chaindata2/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("l2chaindata2"))
+	chainData, err := stack.OpenDatabaseWithExtraOptions("l2chaindata", 0, 0, "l2chaindata/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("l2chaindata"))
 	Require(t, err)
-	wasmData, err := stack.OpenDatabaseWithExtraOptions("wasm2", 0, 0, "wasm2/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("wasm2"))
+	wasmData, err := stack.OpenDatabaseWithExtraOptions("wasm", 0, 0, "wasm/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("wasm"))
 	Require(t, err)
 	chainDb := rawdb.WrapDatabaseWithWasm(chainData, wasmData, wasmCacheTag, execConfig.StylusTarget.WasmTargets())
-	arbDb, err := stack.OpenDatabaseWithExtraOptions("arbitrumdata2", 0, 0, "arbitrumdataL2/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("arbitrumdataL2"))
+	arbDb, err := stack.OpenDatabaseWithExtraOptions("arbitrumdata", 0, 0, "arbitrumdata/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("arbitrumdata"))
 	Require(t, err)
 
 	initReader := statetransfer.NewMemoryInitDataReader(&info.ArbInitData)
@@ -1589,13 +1605,13 @@ func Create2ndNodeWithConfig(
 	chainStack, err := node.New(stackConfig)
 	Require(t, err)
 
-	chainData, err := chainStack.OpenDatabaseWithExtraOptions("l2chaindata2", 0, 0, "l2chaindata2/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("l2chaindata2"))
+	chainData, err := chainStack.OpenDatabaseWithExtraOptions("l2chaindata", 0, 0, "l2chaindata/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("l2chaindata"))
 	Require(t, err)
-	wasmData, err := chainStack.OpenDatabaseWithExtraOptions("wasm2", 0, 0, "wasm2/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("wasm2"))
+	wasmData, err := chainStack.OpenDatabaseWithExtraOptions("wasm", 0, 0, "wasm", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("wasm"))
 	Require(t, err)
 	chainDb := rawdb.WrapDatabaseWithWasm(chainData, wasmData, wasmCacheTag, execConfig.StylusTarget.WasmTargets())
 
-	arbDb, err := chainStack.OpenDatabaseWithExtraOptions("arbitrumdata2", 0, 0, "arbitrumdataL2/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("arbitrumdataL2"))
+	arbDb, err := chainStack.OpenDatabaseWithExtraOptions("arbitrumdata", 0, 0, "arbitrumdata/", false, conf.PersistentConfigDefault.Pebble.ExtraOptions("arbitrumdata"))
 	Require(t, err)
 	initReader := statetransfer.NewMemoryInitDataReader(chainInitData)
 

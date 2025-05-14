@@ -37,7 +37,6 @@ import (
 	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/offchainlabs/nitro/broadcaster"
 	m "github.com/offchainlabs/nitro/broadcaster/message"
-	"github.com/offchainlabs/nitro/espressocrypto"
 	"github.com/offchainlabs/nitro/execution"
 	"github.com/offchainlabs/nitro/staker"
 	"github.com/offchainlabs/nitro/util"
@@ -82,7 +81,7 @@ type TransactionStreamer struct {
 
 	trackBlockMetadataFrom arbutil.MessageIndex
 	// Espresso specific fields. These fields are set from batch poster
-	espressoClient               *espressoClient.Client
+	espressoClient               espressoClient.EspressoClient
 	lightClientReader            lightclient.LightClientReaderInterface
 	espressoTxnsPollingInterval  time.Duration
 	maxBlockLagBeforeEscapeHatch uint64
@@ -1278,17 +1277,16 @@ func (s *TransactionStreamer) checkResult(pos arbutil.MessageIndex, msgResult *e
 			"actual", msgResult.BlockHash,
 		)
 		// Try deleting the existing blockMetadata for this block in arbDB and set it as missing
-		if msgAndBlockInfo.BlockMetadata != nil {
+		if msgAndBlockInfo.BlockMetadata != nil &&
+			s.trackBlockMetadataFrom != 0 && pos >= s.trackBlockMetadataFrom {
 			batch := s.db.NewBatch()
 			if err := batch.Delete(dbKey(blockMetadataInputFeedPrefix, uint64(pos))); err != nil {
 				log.Error("error deleting blockMetadata of block whose BlockHash from feed doesn't match locally computed hash", "msgSeqNum", pos, "err", err)
 				return
 			}
-			if s.trackBlockMetadataFrom != 0 && pos >= s.trackBlockMetadataFrom {
-				if err := batch.Put(dbKey(missingBlockMetadataInputFeedPrefix, uint64(pos)), nil); err != nil {
-					log.Error("error marking deleted blockMetadata as missing in arbDB for a block whose BlockHash from feed doesn't match locally computed hash", "msgSeqNum", pos, "err", err)
-					return
-				}
+			if err := batch.Put(dbKey(missingBlockMetadataInputFeedPrefix, uint64(pos)), nil); err != nil {
+				log.Error("error marking deleted blockMetadata as missing in arbDB for a block whose BlockHash from feed doesn't match locally computed hash", "msgSeqNum", pos, "err", err)
+				return
 			}
 			if err := batch.Write(); err != nil {
 				log.Error("error writing batch that deletes blockMetadata of the block whose BlockHash from feed doesn't match locally computed hash", "msgSeqNum", pos, "err", err)
@@ -1391,6 +1389,70 @@ func (s *TransactionStreamer) executeMessages(ctx context.Context, ignored struc
 	return s.config().ExecuteMessageLoopDelay
 }
 
+func (s *TransactionStreamer) backfillTrackersForMissingBlockMetadata(ctx context.Context) {
+	if s.trackBlockMetadataFrom == 0 {
+		return
+	}
+	msgCount, err := s.GetMessageCount()
+	if err != nil {
+		log.Error("Error getting message count from arbDB", "err", err)
+		return
+	}
+	if s.trackBlockMetadataFrom >= msgCount {
+		return // We dont need to back fill if trackBlockMetadataFrom is in the future
+	}
+
+	wasKeyFound := func(pos uint64) bool {
+		searchWithPrefix := func(prefix []byte) bool {
+			key := dbKey(prefix, pos)
+			_, err := s.db.Get(key)
+			if err == nil {
+				return true
+			}
+			if !dbutil.IsErrNotFound(err) {
+				log.Error("Error reading key in arbDB while back-filling trackers for missing blockMetadata", "key", key, "err", err)
+			}
+			return false
+		}
+		return searchWithPrefix(blockMetadataInputFeedPrefix) || searchWithPrefix(missingBlockMetadataInputFeedPrefix)
+	}
+
+	start := s.trackBlockMetadataFrom
+	if wasKeyFound(uint64(start)) {
+		return // back-filling not required
+	}
+	finish := msgCount - 1
+	for start < finish {
+		mid := (start + finish + 1) / 2
+		if wasKeyFound(uint64(mid)) {
+			finish = mid - 1
+		} else {
+			start = mid
+		}
+	}
+	lastNonExistent := start
+
+	// We back-fill in reverse to avoid fragmentation in case of any failures
+	batch := s.db.NewBatch()
+	for i := lastNonExistent; i >= s.trackBlockMetadataFrom; i-- {
+		if err := batch.Put(dbKey(missingBlockMetadataInputFeedPrefix, uint64(i)), nil); err != nil {
+			log.Error("Error marking blockMetadata as missing while back-filling", "pos", i, "err", err)
+			return
+		}
+		// If we reached the ideal batch size, commit and reset
+		if batch.ValueSize() >= ethdb.IdealBatchSize {
+			if err := batch.Write(); err != nil {
+				log.Error("Error writing batch with missing trackers to db while back-filling", "err", err)
+				return
+			}
+			batch.Reset()
+		}
+	}
+	if err := batch.Write(); err != nil {
+		log.Error("Error writing batch with missing trackers to db while back-filling", "err", err)
+	}
+}
+
 // Check if the latest submitted transaction has been finalized on L1 and verify it.
 // Return a bool indicating whether a new transaction can be submitted to HotShot
 func (s *TransactionStreamer) checkSubmittedTransactionForFinality(ctx context.Context) error {
@@ -1429,52 +1491,9 @@ func (s *TransactionStreamer) checkSubmittedTransactionForFinality(ctx context.C
 		return fmt.Errorf("could not unmarshal header from bytes (height: %d): %w", height, err)
 	}
 
-	log.Info("Fetching Merkle Root at hotshot", "height", height)
-	// Verify the merkle proof
-	snapshot, err := s.lightClientReader.FetchMerkleRoot(height, nil)
-	if err != nil {
-		return fmt.Errorf("%w (height: %d): %w", EspressoValidationErr, height, err)
-	}
-
-	if snapshot.Height <= height {
-		return fmt.Errorf("snapshot height %v is less than or equal to the requested height %v", snapshot.Height, height)
-	}
-
-	nextHeader, err := s.espressoClient.FetchHeaderByHeight(ctx, snapshot.Height)
-	if err != nil {
-		return fmt.Errorf("error fetching the snapshot header (height: %d): %w", snapshot.Height, err)
-	}
-
-	proof, err := s.espressoClient.FetchBlockMerkleProof(ctx, snapshot.Height, height)
-	if err != nil {
-		return fmt.Errorf("error fetching the block merkle proof (height: %d, root height: %d): %w", height, snapshot.Height, err)
-	}
-
-	blockMerkleTreeRoot := nextHeader.Header.GetBlockMerkleTreeRoot()
-
-	ok := espressocrypto.VerifyMerkleProof(proof.Proof, jsonHeader, *blockMerkleTreeRoot, snapshot.Root)
-	if !ok {
-		log.Info("error validating merkle proof", "root", snapshot.Root, "height", height)
-		return fmt.Errorf("error validating merkle proof (height: %d, snapshot height: %d)", height, snapshot.Height)
-	}
-
-	// Verify the namespace proof
 	resp, err := s.espressoClient.FetchTransactionsInBlock(ctx, height, s.chainConfig.ChainID.Uint64())
 	if err != nil {
 		return fmt.Errorf("failed to fetch the transactions in block (height: %d): %w", height, err)
-	}
-
-	namespaceOk := espressocrypto.VerifyNamespace(
-		s.chainConfig.ChainID.Uint64(),
-		resp.Proof,
-		*header.Header.GetPayloadCommitment(),
-		*header.Header.GetNsTable(),
-		resp.Transactions,
-		resp.VidCommon,
-	)
-
-	if !namespaceOk {
-		return fmt.Errorf("error validating namespace proof (height: %d)", height)
 	}
 
 	submittedPayload := firstSubmitted.Payload
@@ -1659,6 +1678,20 @@ func (s *TransactionStreamer) submitEspressoTransactions(ctx context.Context) er
 			if err != nil {
 				return nil, err
 			}
+			if pos > 1 {
+				prevMsg, err := s.GetMessage(pos - 1)
+				if err != nil {
+					return nil, err
+				}
+				if prevMsg.DelayedMessagesRead+1 == msg.DelayedMessagesRead {
+					// This message is a delayed message, and it should not be included
+					// in the hotshot payload. The caff node is supposed to fetch the delayed message
+					// from L1.
+					// setting `msg.Message` to `nil` will cause a rlp decode/encode error
+					// so we set `L2msg` to an empty byte slice instead
+					msg.Message.L2msg = []byte{}
+				}
+			}
 			b, err := rlp.EncodeToBytes(msg)
 			if err != nil {
 				return nil, err
@@ -1796,7 +1829,8 @@ func (s *TransactionStreamer) pollSubmittedTransactionForFinality(ctx context.Co
  * Submits the transactions to espresso if the escape hatch is not enabled
  */
 func (s *TransactionStreamer) submitTransactionsToEspresso(ctx context.Context, ignored struct{}) time.Duration {
-	retryRate := s.espressoTxnsPollingInterval * 50
+	// When encountering an error during the initial attempt at submitting a transaction, double the amount of our polling interval and try again.
+	retryRate := s.espressoTxnsPollingInterval * 2
 	shouldSubmit := s.shouldSubmitEspressoTransaction()
 	// Only submit the transaction if escape hatch is not enabled
 	if shouldSubmit {
@@ -1880,6 +1914,7 @@ func (s *TransactionStreamer) shouldResubmitEspressoTransactions(ctx context.Con
 
 func (s *TransactionStreamer) Start(ctxIn context.Context) error {
 	s.StopWaiter.Start(ctxIn, s)
+	s.LaunchThread(s.backfillTrackersForMissingBlockMetadata)
 
 	if s.lightClientReader != nil && s.espressoClient != nil {
 		err := stopwaiter.CallIterativelyWith[struct{}](&s.StopWaiterSafe, s.pollSubmittedTransactionForFinality, s.newSovereignTxNotifier)

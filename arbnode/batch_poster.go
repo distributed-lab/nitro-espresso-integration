@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/offchainlabs/bold/solgen/go/bridgegen"
-
 	"github.com/offchainlabs/nitro/arbnode/dataposter"
 	"github.com/offchainlabs/nitro/arbnode/dataposter/storage"
 	"github.com/offchainlabs/nitro/arbnode/redislock"
@@ -85,10 +84,11 @@ const (
 	sequencerBatchPostWithBlobsDelayProofMethodName = "addSequencerL2BatchFromBlobsDelayProof"
 	// oldSequencerBatchPostMethodName uses automatically generated solidity function
 	// binding with selector 8f111f3c for "addSequencerL2BatchFromOrigin1"
-	oldSequencerBatchPostMethodName       = "addSequencerL2BatchFromOrigin1"
-	newSequencerBatchPostMethodName       = "addSequencerL2BatchFromOrigin"
-	sequencerBatchPostWithBlobsMethodName = "addSequencerL2BatchFromBlobs"
-	espressoTransactionSizeLimit          = 900 * 1024
+	oldSequencerBatchPostMethodName          = "addSequencerL2BatchFromOrigin1"
+	newSequencerBatchPostMethodName          = "addSequencerL2BatchFromOrigin"
+	oldSequencerBatchPostWithBlobsMethodName = "addSequencerL2BatchFromBlobs"
+	newSequencerBatchPostWithBlobsMethodName = "addSequencerL2BatchFromBlobs0"
+	espressoTransactionSizeLimit             = 900 * 1024
 )
 
 type batchPosterPosition struct {
@@ -128,6 +128,11 @@ type BatchPoster struct {
 	postedFirstBatch     bool        // indicates if batch poster has posted the first batch
 
 	accessList func(SequencerInboxAccs, AfterDelayedMessagesRead uint64) types.AccessList
+	// Types for packing the blob hashes into the data used to generate the batchers attestation quote.
+	bytesType        abi.Type
+	bytes32ArrayType abi.Type
+
+	blobsAttestationArguments abi.Arguments
 }
 
 type l1BlockBound int
@@ -143,7 +148,8 @@ const (
 )
 
 type BatchPosterDangerousConfig struct {
-	AllowPostingFirstBatchWhenSequencerMessageCountMismatch bool `koanf:"allow-posting-first-batch-when-sequencer-message-count-mismatch"`
+	AllowPostingFirstBatchWhenSequencerMessageCountMismatch bool   `koanf:"allow-posting-first-batch-when-sequencer-message-count-mismatch"`
+	FixedGasLimit                                           uint64 `koanf:"fixed-gas-limit"`
 }
 
 type BatchPosterConfig struct {
@@ -185,8 +191,7 @@ type BatchPosterConfig struct {
 	l1BlockBound l1BlockBound
 	// Espresso specific flags
 	LightClientAddress          string        `koanf:"light-client-address"`
-	HotShotUrl                  string        `koanf:"hotshot-url"`
-	FallBackUrl                 string        `koanf:"fall-back-url"`
+	HotShotUrls                 []string      `koanf:"hotshot-urls"`
 	UseEscapeHatch              bool          `koanf:"use-escape-hatch"`
 	EspressoTxnsPollingInterval time.Duration `koanf:"espresso-txns-polling-interval"`
 	ResubmitEspressoTxDeadline  time.Duration `koanf:"resubmit-espresso-tx-deadline"`
@@ -199,10 +204,6 @@ type BatchPosterConfig struct {
 }
 
 func (c *BatchPosterConfig) Validate() error {
-	if (c.LightClientAddress == "") != (c.HotShotUrl == "") {
-		return errors.New("light client address and hotshot URL must both be set together, or both left unset")
-
-	}
 	if len(c.GasRefunderAddress) > 0 && !common.IsHexAddress(c.GasRefunderAddress) {
 		return fmt.Errorf("invalid gas refunder address \"%v\"", c.GasRefunderAddress)
 	}
@@ -230,6 +231,7 @@ type BatchPosterConfigFetcher func() *BatchPosterConfig
 
 func DangerousBatchPosterConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Bool(prefix+".allow-posting-first-batch-when-sequencer-message-count-mismatch", DefaultBatchPosterConfig.Dangerous.AllowPostingFirstBatchWhenSequencerMessageCountMismatch, "allow posting the first batch even if sequence number doesn't match chain (useful after force-inclusion)")
+	f.Uint64(prefix+".fixed-gas-limit", DefaultBatchPosterConfig.Dangerous.FixedGasLimit, "use this gas limit for batch posting instead of estimating it")
 }
 
 func BatchPosterConfigAddOptions(prefix string, f *pflag.FlagSet) {
@@ -251,7 +253,7 @@ func BatchPosterConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	f.String(prefix+".l1-block-bound", DefaultBatchPosterConfig.L1BlockBound, "only post messages to batches when they're within the max future block/timestamp as of this L1 block tag (\"safe\", \"finalized\", \"latest\", or \"ignore\" to ignore this check)")
 	f.Duration(prefix+".l1-block-bound-bypass", DefaultBatchPosterConfig.L1BlockBoundBypass, "post batches even if not within the layer 1 future bounds if we're within this margin of the max delay")
 	f.Bool(prefix+".use-access-lists", DefaultBatchPosterConfig.UseAccessLists, "post batches with access lists to reduce gas usage (disabled for L3s)")
-	f.String(prefix+".hotshot-url", DefaultBatchPosterConfig.HotShotUrl, "specifies the hotshot url if we are batching in espresso mode")
+	f.StringSlice(prefix+".hotshot-urls", DefaultBatchPosterConfig.HotShotUrls, "specifies the hotshot urls if we are batching in espresso mode")
 	f.String(prefix+".light-client-address", DefaultBatchPosterConfig.LightClientAddress, "specifies the hotshot light client address if we are batching in espresso mode")
 	f.Uint64(prefix+".gas-estimate-base-fee-multiple-bips", uint64(DefaultBatchPosterConfig.GasEstimateBaseFeeMultipleBips), "for gas estimation, use this multiple of the basefee (measured in basis points) as the max fee per gas")
 	f.Duration(prefix+".reorg-resistance-margin", DefaultBatchPosterConfig.ReorgResistanceMargin, "do not post batch if its within this duration from layer 1 minimum bounds. Requires l1-block-bound option not be set to \"ignore\"")
@@ -301,7 +303,7 @@ var DefaultBatchPosterConfig = BatchPosterConfig{
 	ResubmitEspressoTxDeadline:     10 * time.Minute,
 	MaxBlockLagBeforeEscapeHatch:   350,
 	LightClientAddress:             "",
-	HotShotUrl:                     "",
+	HotShotUrls:                    []string{},
 }
 
 var DefaultBatchPosterL1WalletConfig = genericconf.WalletConfig{
@@ -338,8 +340,8 @@ var TestBatchPosterConfig = BatchPosterConfig{
 	EspressoTxnsPollingInterval:    time.Second,
 	MaxBlockLagBeforeEscapeHatch:   10,
 	LightClientAddress:             "",
-	HotShotUrl:                     "",
 	ResubmitEspressoTxDeadline:     10 * time.Second,
+	HotShotUrls:                    []string{},
 }
 
 type BatchPosterOpts struct {
@@ -384,11 +386,32 @@ func NewBatchPoster(ctx context.Context, opts *BatchPosterOpts) (*BatchPoster, e
 		return nil, err
 	}
 
-	hotShotUrl := opts.Config().HotShotUrl
-	lightClientAddr := opts.Config().LightClientAddress
+	bytesType, err := abi.NewType("bytes", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	bytes32ArrayType, err := abi.NewType("bytes32[]", "", nil)
+	if err != nil {
+		return nil, err
+	}
 
-	if hotShotUrl != "" {
-		hotShotClient := hotshotClient.NewClient(hotShotUrl, opts.Config().FallBackUrl)
+	method, ok := seqInboxABI.Methods[oldSequencerBatchPostWithBlobsMethodName]
+	if !ok {
+		return nil, errors.New("failed to find add batch method")
+	}
+	blobsAttestationArguments := method.Inputs
+	blobsAttestationArguments = append(blobsAttestationArguments, abi.Argument{Type: bytesType})
+
+	hotShotUrls := opts.Config().HotShotUrls
+
+	lightClientAddr := opts.Config().LightClientAddress
+	hotShotUrlsLen := len(hotShotUrls)
+
+	// If the length of the hotshot urls is greater than zero, and it's not length 1 with an empty string, create the espresso multiple nodes client.
+
+	if hotShotUrlsLen != 0 && !(hotShotUrls[0] == "" && hotShotUrlsLen == 1) {
+		//  TODO: tech debt should remove fallback urls in the future
+		hotShotClient := hotshotClient.NewMultipleNodesClient(hotShotUrls)
 		opts.Streamer.espressoClient = hotShotClient
 	}
 
@@ -406,20 +429,23 @@ func NewBatchPoster(ctx context.Context, opts *BatchPosterOpts) (*BatchPoster, e
 	}
 
 	b := &BatchPoster{
-		l1Reader:           opts.L1Reader,
-		inbox:              opts.Inbox,
-		streamer:           opts.Streamer,
-		arbOSVersionGetter: opts.VersionGetter,
-		syncMonitor:        opts.SyncMonitor,
-		config:             opts.Config,
-		seqInbox:           seqInbox,
-		seqInboxABI:        seqInboxABI,
-		seqInboxAddr:       opts.DeployInfo.SequencerInbox,
-		gasRefunderAddr:    opts.Config().gasRefunder,
-		bridgeAddr:         opts.DeployInfo.Bridge,
-		dapWriter:          opts.DAPWriter,
-		redisLock:          redisLock,
-		dapReaders:         opts.DAPReaders,
+		l1Reader:                  opts.L1Reader,
+		inbox:                     opts.Inbox,
+		streamer:                  opts.Streamer,
+		arbOSVersionGetter:        opts.VersionGetter,
+		syncMonitor:               opts.SyncMonitor,
+		config:                    opts.Config,
+		seqInbox:                  seqInbox,
+		seqInboxABI:               seqInboxABI,
+		seqInboxAddr:              opts.DeployInfo.SequencerInbox,
+		gasRefunderAddr:           opts.Config().gasRefunder,
+		bridgeAddr:                opts.DeployInfo.Bridge,
+		dapWriter:                 opts.DAPWriter,
+		redisLock:                 redisLock,
+		dapReaders:                opts.DAPReaders,
+		bytesType:                 bytesType,
+		bytes32ArrayType:          bytes32ArrayType,
+		blobsAttestationArguments: blobsAttestationArguments,
 	}
 	b.messagesPerBatch, err = arbmath.NewMovingAverage[uint64](20)
 	if err != nil {
@@ -1069,6 +1095,120 @@ func (s *batchSegments) SetWaitingForValidation() {
 		s.isWaitingForEspressoValidation = true
 	}
 }
+
+func (b *BatchPoster) getCalldataForEspressoBatch(
+	seqNum *big.Int,
+	prevMsgNum arbutil.MessageIndex,
+	newMsgNum arbutil.MessageIndex,
+	l2MessageData []byte,
+	delayedMsg uint64,
+) ([]byte, error) {
+	var args []any
+	method, ok := b.seqInboxABI.Methods[oldSequencerBatchPostMethodName]
+	if !ok {
+		return nil, errors.New("failed to find add batch method")
+	}
+	// initially constructing the calldata using the old oldSequencerBatchPostMethodName method
+	// This will allow us to get the attestation quote on the hash of the data
+	args = append(args, seqNum)
+	args = append(args, l2MessageData)
+	args = append(args, new(big.Int).SetUint64(delayedMsg))
+	args = append(args, b.config().gasRefunder)
+	args = append(args, new(big.Int).SetUint64(uint64(prevMsgNum)))
+	args = append(args, new(big.Int).SetUint64(uint64(newMsgNum)))
+
+	// Later append the delay proof if needed for getting the attestion quote.
+	// If not, only append at the end of the calldata as done below.
+	calldata, err := method.Inputs.Pack(args...)
+	if err != nil {
+		return nil, err
+	}
+
+	attestationQuote, err := b.streamer.getAttestationQuote(calldata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get attestation quote: %w", err)
+	}
+	// Construct the calldata with attestation quote
+	method, ok = b.seqInboxABI.Methods[newSequencerBatchPostMethodName]
+	if !ok {
+		return nil, errors.New("failed to find add batch method")
+	}
+	args = append(args, attestationQuote)
+
+	calldata, err = method.Inputs.Pack(args...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	fullCalldata := append([]byte{}, method.ID...)
+	fullCalldata = append(fullCalldata, calldata...)
+	return fullCalldata, nil
+}
+
+func (b *BatchPoster) getCalldataForEspressoBlobBatch(
+	seqNum *big.Int,
+	prevMsgNum arbutil.MessageIndex,
+	newMsgNum arbutil.MessageIndex,
+	l2MessageData []byte,
+	delayedMsg uint64,
+) ([]byte, error) {
+	var args []any
+	method, ok := b.seqInboxABI.Methods[newSequencerBatchPostWithBlobsMethodName]
+	if !ok {
+		return nil, errors.New("failed to find add batch method")
+	}
+	kzgBlobs, err := blobs.EncodeBlobs(l2MessageData)
+	if err != nil {
+		return nil, err
+	}
+	_, blobHashes, err := blobs.ComputeCommitmentsAndHashes(kzgBlobs)
+	if err != nil {
+		return nil, err
+	}
+	// initially constructing the calldata using the old SequencerBatchPostWithBlobsMethodName method
+	// This will allow us to get the attestation quote on the hash of the dataPoster
+	encodedBlobs, err := abi.Arguments{abi.Argument{Type: b.bytes32ArrayType}}.Pack(blobHashes)
+
+	if err != nil {
+		return nil, err
+	}
+
+	args = append(args, seqNum)
+	args = append(args, new(big.Int).SetUint64(delayedMsg))
+	args = append(args, b.config().gasRefunder)
+	args = append(args, new(big.Int).SetUint64(uint64(prevMsgNum)))
+	args = append(args, new(big.Int).SetUint64(uint64(newMsgNum)))
+
+	var attestationArgs []any
+	attestationArgs = append(attestationArgs, args...)
+	// pack remaining data for the attestation quote.
+	attestationArgs = append(attestationArgs, encodedBlobs)
+
+	// Generate the attestation quote over the method args, and the blob hashes.
+	packedData, err := b.blobsAttestationArguments.Pack(attestationArgs...)
+	if err != nil {
+		return nil, err
+	}
+	// Generate attestation quote
+	attestationQuote, err := b.streamer.getAttestationQuote(packedData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get attestation quote: %w", err)
+	}
+	// Construct the calldata with attestation quote
+	args = append(args, attestationQuote)
+
+	calldata, err := method.Inputs.Pack(args...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	fullCalldata := append([]byte{}, method.ID...)
+	fullCalldata = append(fullCalldata, calldata...)
+	return fullCalldata, nil
+}
+
 func (b *BatchPoster) encodeAddBatch(
 	seqNum *big.Int,
 	prevMsgNum arbutil.MessageIndex,
@@ -1083,7 +1223,7 @@ func (b *BatchPoster) encodeAddBatch(
 		if delayProof != nil {
 			methodName = sequencerBatchPostWithBlobsDelayProofMethodName
 		} else {
-			methodName = sequencerBatchPostWithBlobsMethodName
+			methodName = newSequencerBatchPostWithBlobsMethodName
 		}
 	} else if delayProof != nil {
 		methodName = sequencerBatchPostDelayProofMethodName
@@ -1098,51 +1238,24 @@ func (b *BatchPoster) encodeAddBatch(
 	var kzgBlobs []kzg4844.Blob
 	var fullCalldata []byte
 	var err error
-	if methodName == newSequencerBatchPostMethodName {
-		log.Info("Coming inside the newSequencerBatchPostMethodName")
-		method, ok := b.seqInboxABI.Methods[oldSequencerBatchPostMethodName]
-		if !ok {
-			return nil, nil, errors.New("failed to find add batch method")
-		}
-		// initially constructing the calldata using the old oldSequencerBatchPostMethodName method
-		// This will allow us to get the attestation quote on the hash of the data
-		args = append(args, seqNum)
-		args = append(args, l2MessageData)
-		args = append(args, new(big.Int).SetUint64(delayedMsg))
-		args = append(args, b.config().gasRefunder)
-		args = append(args, new(big.Int).SetUint64(uint64(prevMsgNum)))
-		args = append(args, new(big.Int).SetUint64(uint64(newMsgNum)))
-
-		// Later append the delay proof if needed for getting the attestion quote.
-		// If not, only append at the end of the calldata as done below.
-
-		calldata, err := method.Inputs.Pack(args...)
+	switch methodName {
+	case newSequencerBatchPostMethodName:
+		log.Info("Encoding Espresso validated batch via:", "method", methodName)
+		fullCalldata, err = b.getCalldataForEspressoBatch(seqNum, prevMsgNum, newMsgNum, l2MessageData, delayedMsg)
 		if err != nil {
 			return nil, nil, err
 		}
-
-		attestationQuote, err := b.streamer.getAttestationQuote(calldata)
+	case newSequencerBatchPostWithBlobsMethodName:
+		log.Info("Encoding Espresso validated batch via testing:", "method", methodName)
+		kzgBlobs, err = blobs.EncodeBlobs(l2MessageData)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get attestation quote: %w", err)
+			return nil, nil, fmt.Errorf("failed to encode blobs: %w", err)
 		}
-
-		// Construct the calldata with attestation quote
-		method, ok = b.seqInboxABI.Methods[newSequencerBatchPostMethodName]
-		if !ok {
-			return nil, nil, errors.New("failed to find add batch method")
-		}
-		args = append(args, attestationQuote)
-
-		calldata, err = method.Inputs.Pack(args...)
-
+		fullCalldata, err = b.getCalldataForEspressoBlobBatch(seqNum, prevMsgNum, newMsgNum, l2MessageData, delayedMsg)
 		if err != nil {
 			return nil, nil, err
 		}
-
-		fullCalldata = append([]byte{}, method.ID...)
-		fullCalldata = append(fullCalldata, calldata...)
-
-	} else {
+	default:
 		log.Info("Coming inside the oldSequencerBatchPostMethodName", "methodName", methodName)
 		args = append(args, seqNum)
 		if use4844 {
@@ -1167,8 +1280,8 @@ func (b *BatchPoster) encodeAddBatch(
 		}
 		fullCalldata = append([]byte{}, method.ID...)
 		fullCalldata = append(fullCalldata, calldata...)
-	}
 
+	}
 	return fullCalldata, kzgBlobs, nil
 }
 
@@ -1183,65 +1296,77 @@ type estimateGasParams struct {
 	BlobHashes   []common.Hash    `json:"blobVersionedHashes,omitempty"`
 }
 
+type OverrideAccount struct {
+	StateDiff map[common.Hash]common.Hash `json:"stateDiff"`
+}
+
+type StateOverride map[common.Address]OverrideAccount
+
 func estimateGas(client rpc.ClientInterface, ctx context.Context, params estimateGasParams) (uint64, error) {
 	var gas hexutil.Uint64
 	err := client.CallContext(ctx, &gas, "eth_estimateGas", params)
 	return uint64(gas), err
 }
 
-func (b *BatchPoster) estimateGas(
+func (b *BatchPoster) estimateGasSimple(
 	ctx context.Context,
-	sequencerMessage []byte,
-	delayedMessages uint64,
 	realData []byte,
 	realBlobs []kzg4844.Blob,
-	realNonce uint64,
 	realAccessList types.AccessList,
-	delayProof *bridgegen.DelayProof,
 ) (uint64, error) {
 
 	config := b.config()
 	rpcClient := b.l1Reader.Client()
 	rawRpcClient := rpcClient.Client()
-	useNormalEstimation := b.dataPoster.MaxMempoolTransactions() == 1
-	if !useNormalEstimation {
-		// Check if we can use normal estimation anyways because we're at the latest nonce
-		latestNonce, err := rpcClient.NonceAt(ctx, b.dataPoster.Sender(), nil)
-		if err != nil {
-			return 0, err
-		}
-		useNormalEstimation = latestNonce == realNonce
-	}
 	latestHeader, err := rpcClient.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	maxFeePerGas := arbmath.BigMulByUBips(latestHeader.BaseFee, config.GasEstimateBaseFeeMultipleBips)
-	if useNormalEstimation {
-		_, realBlobHashes, err := blobs.ComputeCommitmentsAndHashes(realBlobs)
-		if err != nil {
-			return 0, fmt.Errorf("failed to compute real blob commitments: %w", err)
-		}
-		// If we're at the latest nonce, we can skip the special future tx estimate stuff
-		gas, err := estimateGas(rawRpcClient, ctx, estimateGasParams{
-			From:         b.dataPoster.Sender(),
-			To:           &b.seqInboxAddr,
-			Data:         realData,
-			MaxFeePerGas: (*hexutil.Big)(maxFeePerGas),
-			BlobHashes:   realBlobHashes,
-			AccessList:   realAccessList,
-		})
-		if err != nil {
-			return 0, fmt.Errorf("%w: %w", ErrNormalGasEstimationFailed, err)
-		}
-		return gas + config.ExtraBatchGas, nil
+	_, realBlobHashes, err := blobs.ComputeCommitmentsAndHashes(realBlobs)
+	if err != nil {
+		return 0, fmt.Errorf("failed to compute real blob commitments: %w", err)
 	}
+	// If we're at the latest nonce, we can skip the special future tx estimate stuff
+	gas, err := estimateGas(rawRpcClient, ctx, estimateGasParams{
+		From:         b.dataPoster.Sender(),
+		To:           &b.seqInboxAddr,
+		Data:         realData,
+		MaxFeePerGas: (*hexutil.Big)(maxFeePerGas),
+		BlobHashes:   realBlobHashes,
+		AccessList:   realAccessList,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrNormalGasEstimationFailed, err)
+	}
+	return gas + config.ExtraBatchGas, nil
+}
+
+// This estimates gas for a batch with future nonce
+// a prev. batch is already pending in the parent chain's mempool
+func (b *BatchPoster) estimateGasForFutureTx(
+	ctx context.Context,
+	sequencerMessage []byte,
+	delayedMessagesBefore uint64,
+	delayedMessagesAfter uint64,
+	realAccessList types.AccessList,
+	usingBlobs bool,
+	delayProof *bridgegen.DelayProof,
+) (uint64, error) {
+	config := b.config()
+	rpcClient := b.l1Reader.Client()
+	rawRpcClient := rpcClient.Client()
+	latestHeader, err := rpcClient.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	maxFeePerGas := arbmath.BigMulByUBips(latestHeader.BaseFee, config.GasEstimateBaseFeeMultipleBips)
 
 	// Here we set seqNum to MaxUint256, and prevMsgNum to 0, because it disables the smart contracts' consistency checks.
 	// However, we set nextMsgNum to 1 because it is necessary for a correct estimation for the final to be non-zero.
 	// Because we're likely estimating against older state, this might not be the actual next message,
 	// but the gas used should be the same.
-	data, kzgBlobs, err := b.encodeAddBatch(abi.MaxUint256, 0, 1, sequencerMessage, delayedMessages, len(realBlobs) > 0, delayProof)
+	data, kzgBlobs, err := b.encodeAddBatch(abi.MaxUint256, 0, 1, sequencerMessage, delayedMessagesAfter, usingBlobs, delayProof)
 	if err != nil {
 		return 0, err
 	}
@@ -1249,7 +1374,7 @@ func (b *BatchPoster) estimateGas(
 	if err != nil {
 		return 0, fmt.Errorf("failed to compute blob commitments: %w", err)
 	}
-	gas, err := estimateGas(rawRpcClient, ctx, estimateGasParams{
+	gasParams := estimateGasParams{
 		From:         b.dataPoster.Sender(),
 		To:           &b.seqInboxAddr,
 		Data:         data,
@@ -1258,7 +1383,22 @@ func (b *BatchPoster) estimateGas(
 		// This isn't perfect because we're probably estimating the batch at a different sequence number,
 		// but it should overestimate rather than underestimate which is fine.
 		AccessList: realAccessList,
-	})
+	}
+	// slot 0 in the SequencerInbox smart contract holds totalDelayedMessagesRead -
+	// This is the number of delayed messages that sequencer knows were processed
+	// SequencerInbox checks this value to make sure delayed inbox isn't going backward,
+	// And it makes it know if a delayProof is needed
+	// Both are required for successful batch posting
+	stateOverride := StateOverride{
+		b.seqInboxAddr: {
+			StateDiff: map[common.Hash]common.Hash{
+				// slot 0
+				{}: common.Hash(arbmath.Uint64ToU256Bytes(delayedMessagesBefore)),
+			},
+		},
+	}
+	var gas hexutil.Uint64
+	err = rawRpcClient.CallContext(ctx, &gas, "eth_estimateGas", gasParams, rpc.PendingBlockNumber, stateOverride)
 	if err != nil {
 		sequencerMessageHeader := sequencerMessage
 		if len(sequencerMessageHeader) > 33 {
@@ -1267,13 +1407,14 @@ func (b *BatchPoster) estimateGas(
 		log.Warn(
 			"error estimating gas for batch",
 			"err", err,
-			"delayedMessages", delayedMessages,
+			"delayedMessagesBefore", delayedMessagesBefore,
+			"delayedMessagesAfter", delayedMessagesAfter,
 			"sequencerMessageHeader", hex.EncodeToString(sequencerMessageHeader),
 			"sequencerMessageLen", len(sequencerMessage),
 		)
 		return 0, fmt.Errorf("error estimating gas for batch: %w", err)
 	}
-	return gas + config.ExtraBatchGas, nil
+	return uint64(gas) + config.ExtraBatchGas, nil
 }
 
 const ethPosBlockTime = 12 * time.Second
@@ -1358,12 +1499,6 @@ func (b *BatchPoster) maybePostSequencerBatch(ctx context.Context) (bool, error)
 	if msgCount <= batchPosition.MessageCount {
 		// There's nothing after the newest batch, therefore batch posting was not required
 		return false, nil
-	}
-
-	lastPotentialMsg, err := b.streamer.GetMessage(msgCount - 1)
-	if err != nil {
-
-		return false, err
 	}
 
 	config := b.config()
@@ -1652,15 +1787,34 @@ func (b *BatchPoster) maybePostSequencerBatch(ctx context.Context) (bool, error)
 		return false, fmt.Errorf("produced %v blobs for batch but a block can only hold %v (compressed batch was %v bytes long)", len(kzgBlobs), params.MaxBlobGasPerBlock/params.BlobTxBlobGasPerBlob, len(sequencerMsg))
 	}
 	accessList := b.accessList(batchPosition.NextSeqNum, b.building.segments.delayedMsg)
+	var gasLimit uint64
+	if b.config().Dangerous.FixedGasLimit != 0 {
+		gasLimit = b.config().Dangerous.FixedGasLimit
+	} else {
+		useSimpleEstimation := b.dataPoster.MaxMempoolTransactions() == 1
+		if !useSimpleEstimation {
+			// Check if we can use normal estimation anyways because we're at the latest nonce
+			latestNonce, err := b.l1Reader.Client().NonceAt(ctx, b.dataPoster.Sender(), nil)
+			if err != nil {
+				return false, err
+			}
+			useSimpleEstimation = latestNonce == nonce
+		}
 
-	// On restart, we may be trying to estimate gas for a batch whose successor has
-	// already made it into pending state, if not latest state.
-	// In that case, we might get a revert with `DelayedBackwards()`.
-	// To avoid that, we artificially increase the delayed messages to `lastPotentialMsg.DelayedMessagesRead`.
-	// In theory, this might reduce gas usage, but only by a factor that's already
-	// accounted for in `config.ExtraBatchGas`, as that same factor can appear if a user
-	// posts a new delayed message that we didn't see while gas estimating.
-	gasLimit, err := b.estimateGas(ctx, sequencerMsg, lastPotentialMsg.DelayedMessagesRead, data, kzgBlobs, nonce, accessList, delayProof)
+		if useSimpleEstimation {
+			gasLimit, err = b.estimateGasSimple(ctx, data, kzgBlobs, accessList)
+		} else {
+			// When there are previous batches queued up in the dataPoster, we override the delayed message count in the sequencer inbox
+			// so it accepts the corresponding delay proof. Otherwise, the gas estimation would revert.
+			var delayedMsgBefore uint64
+			if b.building.firstDelayedMsg != nil {
+				delayedMsgBefore = b.building.firstDelayedMsg.DelayedMessagesRead - 1
+			} else if b.building.firstNonDelayedMsg != nil {
+				delayedMsgBefore = b.building.firstNonDelayedMsg.DelayedMessagesRead
+			}
+			gasLimit, err = b.estimateGasForFutureTx(ctx, sequencerMsg, delayedMsgBefore, b.building.segments.delayedMsg, accessList, len(kzgBlobs) > 0, delayProof)
+		}
+	}
 	if err != nil {
 		return false, err
 	}
