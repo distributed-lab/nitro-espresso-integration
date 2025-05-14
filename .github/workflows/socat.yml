@@ -38,7 +38,7 @@ jobs:
       - name: Prepare Dockerfile
         run: |
           echo 'FROM scratch' > Dockerfile
-          echo 'COPY socat /socat' >> Dockerfile
+          echo 'COPY socat-${{ env.SOCAT_VERSION }}/socat /socat' >> Dockerfile
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
