@@ -2,16 +2,18 @@ name: Build socat
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "**"
+    inputs:
+      socat_version:
+        description: 'Socat version'
+        required: true
+        default: '1.7.4.4'
+      socat_sha256:
+        description: 'Socat archive SHA256 hash'
+        required: true
+        default: '0f8f4b9d5c60b8c53d17b60d79ababc4a0f51b3bb6d2bd3ae8a6a4b9d68f195e'
 
 permissions:
   packages: write
-
-env:
-  SOCAT_VERSION: "1.7.4.4"
-  SOCAT_SHA256: "0f8f4b9d5c60b8c53d17b60d79ababc4a0f51b3bb6d2bd3ae8a6a4b9d68f195e"
 
 jobs:
   build:
@@ -21,24 +23,24 @@ jobs:
         run: sudo apt install -y wget make gcc
 
       - name: Download socat sources
-        run: wget http://www.dest-unreach.org/socat/download/socat-${{ env.SOCAT_VERSION }}.tar.gz
+        run: wget http://www.dest-unreach.org/socat/download/socat-${{ github.event.inputs.socat_version }}.tar.gz
       
       - name: Verify socat sources
-        run: echo "${{ env.SOCAT_SHA256 }} socat-${{ env.SOCAT_VERSION }}.tar.gz" | sha256sum -c -
+        run: echo "${{ github.event.inputs.socat_sha256 }} socat-${{ github.event.inputs.socat_version }}.tar.gz" | sha256sum -c -
 
       - name: Unpack socat sources
-        run: tar -xzf socat-${{ env.SOCAT_VERSION }}.tar.gz
+        run: tar -xzf socat-${{ github.event.inputs.socat_version }}.tar.gz
       
       - name: Build socat
         run: |
-          cd socat-${{ env.SOCAT_VERSION }}
+          cd socat-${{ github.event.inputs.socat_version }}
           ./configure LDFLAGS="-static"
           make
 
       - name: Prepare Dockerfile
         run: |
           echo 'FROM scratch' > Dockerfile
-          echo 'COPY socat-${{ env.SOCAT_VERSION }}/socat /socat' >> Dockerfile
+          echo 'COPY socat-${{ github.event.inputs.socat_version }}/socat /socat' >> Dockerfile
           echo 'ENTRYPOINT /socat' >> Dockerfile
 
       - name: Set up Docker Buildx
@@ -58,4 +60,4 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository }}/socat:v${{ env.SOCAT_VERSION }}
+          tags: ghcr.io/${{ github.repository }}/socat:v${{ github.event.inputs.socat_version }}
