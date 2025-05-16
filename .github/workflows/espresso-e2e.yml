@@ -133,7 +133,7 @@ jobs:
         run: cd contracts && yarn install && forge install
 
       - name: Build
-        run: make --trace build build-replay-env
+        run: make build build-replay-env -j
 
       - name: Install docker-compose
         uses: KengoTODA/actions-setup-docker-compose@v1.2.1
