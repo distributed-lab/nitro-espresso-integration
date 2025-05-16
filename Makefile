@@ -46,6 +46,8 @@ output_root=target
 sed_escaped_output_root:=$(subst /,\/,$(output_root))
 output_latest=$(output_root)/machines/latest
 
+export PKG_CONFIG_PATH=$(abspath $(output_root)/pkgconfig)
+
 repo_dirs = arbos arbcompress arbnode arbutil arbstate cmd das espressocrypto precompiles solgen system_tests util validator wavmio
 go_source.go = $(wildcard $(patsubst %,%/*.go, $(repo_dirs)) $(patsubst %,%/*/*.go, $(repo_dirs)))
 go_source.s  = $(wildcard $(patsubst %,%/*.s, $(repo_dirs)) $(patsubst %,%/*/*.s, $(repo_dirs)))
@@ -342,7 +344,7 @@ docker:
 # regular build rules
 
 $(output_root)/bin/nitro: $(DEP_PREDICATE) build-node-deps
-	export PKG_CONFIG_PATH=$(abspath $(output_root)/pkgconfig) && go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/nitro"
+	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/nitro"
 
 $(output_root)/bin/deploy: $(DEP_PREDICATE) build-node-deps
 	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/deploy"
