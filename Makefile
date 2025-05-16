@@ -46,6 +46,7 @@ precompile_names = AddressTable Aggregator BLS Debug FunctionTable GasInfo Info 
 precompiles = $(patsubst %,./solgen/generated/%.go, $(precompile_names))
 
 output_root=target
+export PKG_CONFIG_PATH=$(abspath $(output_root)/pkgconfig)
 sed_escaped_output_root:=$(subst /,\/,$(output_root))
 output_latest=$(output_root)/machines/latest
 
@@ -395,7 +396,7 @@ docker:
 # regular build rules
 
 $(output_root)/bin/nitro: $(DEP_PREDICATE) build-node-deps
-	export PKG_CONFIG_PATH=$(abspath $(output_root)/pkgconfig) && go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/nitro"
+	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/nitro"
 
 $(output_root)/bin/deploy: $(DEP_PREDICATE) build-node-deps
 	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/deploy"
