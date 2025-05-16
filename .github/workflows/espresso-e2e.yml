@@ -6,8 +6,7 @@ on:
   pull_request:
   push:
     branches:
-      - integration
-      - celestia-integration
+      - "**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -134,7 +133,7 @@ jobs:
         run: cd contracts && yarn install && forge install
 
       - name: Build
-        run: make build build-replay-env -j
+        run: make --trace build build-replay-env
 
       - name: Install docker-compose
         uses: KengoTODA/actions-setup-docker-compose@v1.2.1
