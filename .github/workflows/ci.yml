@@ -194,7 +194,6 @@ jobs:
         with:
           version: v1.63
           skip-pkg-cache: true
-          args: --out-format=colored-line-number
       - name: Custom Lint
         run: |
           go run ./linters ./...
