@@ -1,6 +1,11 @@
 name: Go tests CI
 run-name: Go tests CI triggered from @${{ github.actor }} of ${{ github.head_ref }}
 
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
 on:
   workflow_dispatch:
   merge_group:
