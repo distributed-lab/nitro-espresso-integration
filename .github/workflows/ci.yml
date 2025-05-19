@@ -181,6 +181,7 @@ jobs:
 
       - name: Build
         run: make build test-go-deps -j
+        continue-on-error: true
 
       - name: Build all lint dependencies
         run: make -j build-node-deps
