@@ -28,7 +28,9 @@ jobs:
     needs: free-disk-space
     name: Go Tests
     runs-on: ubuntu-latest
-
+    env:
+      PKG_CONFIG_PATH: ${{ github.workspace }}/target/pkgconfig 
+      
     # Creates a redis container for redis tests
     services:
       redis:
