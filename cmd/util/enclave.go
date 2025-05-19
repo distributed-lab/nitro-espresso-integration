@@ -23,8 +23,10 @@ import (
 	"github.com/distributed-lab/enclave-extras/attestation"
 	"github.com/distributed-lab/enclave-extras/attestation/kmshelpers"
 	"github.com/distributed-lab/enclave-extras/nsm"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/crypto"
+
 	"github.com/offchainlabs/nitro/cmd/genericconf"
 )
 
@@ -123,7 +125,7 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 		if err != nil {
 			return nil, fmt.Errorf("failed to get attestation document for %s: %w", kmsKeyIDPath, err)
 		}
-		if err = os.WriteFile(kmsKeyIDPath, kmsKeyIDAttestationDocRaw, 0666); err != nil {
+		if err = os.WriteFile(kmsKeyIDPath, kmsKeyIDAttestationDocRaw, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", kmsKeyIDPath, err)
 		}
 	default:
@@ -183,7 +185,7 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 		if err != nil {
 			return nil, fmt.Errorf("failed to get attestation doc for %s: %w", privateKeyPath, err)
 		}
-		if err = os.WriteFile(privateKeyPath, privateKeyAttestationDocRaw, 0666); err != nil {
+		if err = os.WriteFile(privateKeyPath, privateKeyAttestationDocRaw, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", privateKeyPath, err)
 		}
 	default:
@@ -211,7 +213,7 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 		if err != nil {
 			return nil, fmt.Errorf("failed to get attestation document for %s: %w", addressPath, err)
 		}
-		if err = os.WriteFile(addressPath, addressAttestationDocRaw, 0666); err != nil {
+		if err = os.WriteFile(addressPath, addressAttestationDocRaw, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", addressPath, err)
 		}
 	default:
