@@ -1,9 +1,10 @@
 // Copyright 2021-2022, Offchain Labs, Inc.
-// For license information, see https://github.com/nitro/blob/master/LICENSE
+// For license information, see https://github.com/OffchainLabs/nitro/blob/master/LICENSE.md
 
 package broadcastclient
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsflate"
 	flag "github.com/spf13/pflag"
+	"golang.org/x/net/proxy"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
@@ -38,6 +41,8 @@ var (
 	sourcesConnectedGauge    = metrics.NewRegisteredGauge("arb/feed/sources/connected", nil)
 	sourcesDisconnectedGauge = metrics.NewRegisteredGauge("arb/feed/sources/disconnected", nil)
 )
+
+var TransactionStreamerBlockCreationStopped = errors.New("block creation stopped in transaction streamer")
 
 type FeedConfig struct {
 	Output wsbroadcastserver.BroadcasterConfig `koanf:"output" reload:"hot"`
@@ -139,6 +144,7 @@ type BroadcastClient struct {
 
 	retrying                        bool
 	shuttingDown                    bool
+	firstReconnectAttempt           bool
 	confirmedSequenceNumberListener chan arbutil.MessageIndex
 	txStreamer                      TransactionStreamerInterface
 	fatalErrChan                    chan error
@@ -175,6 +181,7 @@ func NewBroadcastClient(
 		fatalErrChan:                    fatalErrChan,
 		sigVerifier:                     sigVerifier,
 		adjustCount:                     adjustCount,
+		firstReconnectAttempt:           true,
 	}, err
 }
 
@@ -212,6 +219,107 @@ func (bc *BroadcastClient) Start(ctxIn context.Context) {
 			}
 		}
 	})
+}
+
+// In the case where there is a proxy setup
+// Connect to proxy first, then make request to address through proxy.
+func (bc *BroadcastClient) connectWithProxy(
+	ctx context.Context,
+	dialer net.Dialer,
+	proxyURL *url.URL,
+	addr string,
+) (net.Conn, error) {
+	// Connect to proxy
+	var conn net.Conn
+	var err error
+	switch proxyURL.Scheme {
+	case "https":
+		tlsDialer := &tls.Dialer{
+			Config: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		}
+		conn, err = tlsDialer.DialContext(ctx, "tcp4", proxyURL.Host)
+		if err != nil {
+			log.Warn("https proxy tcp4 connection failed, falling back to tcp6", "proxy", proxyURL.Host, "err", err)
+			conn, err = tlsDialer.DialContext(ctx, "tcp6", proxyURL.Host)
+			if err != nil {
+				return nil, err
+			}
+		}
+	case "http":
+		conn, err = dialer.DialContext(ctx, "tcp4", proxyURL.Host)
+		if err != nil {
+			log.Warn("http proxy tcp4 connection failed, falling back to tcp6", "proxy", proxyURL.Host, "err", err)
+			conn, err = dialer.DialContext(ctx, "tcp6", proxyURL.Host)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+	case "socks5":
+		proxyDialer, err := proxy.FromURL(proxyURL, &net.Dialer{})
+		if err != nil {
+			return nil, fmt.Errorf("SOCKS5 setup failed: %w", err)
+		}
+		conn, err = proxyDialer.Dial("tcp4", addr)
+		if err != nil {
+			log.Warn("socks5 proxy tcp4 connection failed, falling back to tcp6", "proxy", proxyURL.Host, "err", err)
+			conn, err = proxyDialer.Dial("tcp6", addr)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return conn, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
+	}
+
+	// Connect to address through proxy
+	connectReq := &http.Request{
+		Method: "CONNECT",
+		URL:    &url.URL{Opaque: addr},
+		Host:   addr,
+		Header: make(http.Header),
+	}
+	if proxyURL.User != nil {
+		username := proxyURL.User.Username()
+		password, _ := proxyURL.User.Password()
+		connectReq.SetBasicAuth(username, password)
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("%s proxy set deadline failed: %w", proxyURL.Scheme, err)
+		}
+		// clear deadline
+		defer func() {
+			if err := conn.SetDeadline(time.Time{}); err != nil {
+				log.Warn("Failed to clear deadline on %s proxy connection: %v", proxyURL.Scheme, err)
+			}
+		}()
+	}
+
+	if err := connectReq.Write(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("http proxy connect to %s failed: %w", addr, err)
+	}
+
+	// Verify response
+	resp, err := http.ReadResponse(bufio.NewReader(conn), connectReq)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("http proxy response error: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		conn.Close()
+		return nil, fmt.Errorf("http proxy refused: %s", resp.Status)
+	}
+
+	return conn, nil
 }
 
 func (bc *BroadcastClient) connect(ctx context.Context, nextSeqNum arbutil.MessageIndex) (io.Reader, error) {
@@ -284,15 +392,23 @@ func (bc *BroadcastClient) connect(ctx context.Context, nextSeqNum arbutil.Messa
 		Extensions: extensions,
 		NetDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var netDialer net.Dialer
-			// For tcp connections, prefer IPv4 over IPv6 to avoid rate limiting issues
-			if network == "tcp" {
+			if network != "tcp" {
+				return netDialer.DialContext(ctx, network, addr)
+			}
+
+			// Check if we need to connect to proxy
+			req := &http.Request{URL: &url.URL{Scheme: "https", Host: addr}}
+			proxyURL, err := http.ProxyFromEnvironment(req)
+			// If no proxy is setup just connect to the addr
+			if err != nil || proxyURL == nil {
+				// For tcp connections, prefer IPv4 over IPv6 to avoid rate limiting issues
 				conn, err := netDialer.DialContext(ctx, "tcp4", addr)
 				if err == nil {
 					return conn, nil
 				}
 				return netDialer.DialContext(ctx, "tcp6", addr)
 			}
-			return netDialer.DialContext(ctx, network, addr)
+			return bc.connectWithProxy(ctx, netDialer, proxyURL, addr)
 		},
 	}
 
@@ -359,6 +475,7 @@ func (bc *BroadcastClient) connect(ctx context.Context, nextSeqNum arbutil.Messa
 	bc.connMutex.Lock()
 	bc.conn = conn
 	bc.compression = compressionNegotiated
+	bc.firstReconnectAttempt = true
 	bc.connMutex.Unlock()
 	log.Info("Feed connected", "feedServerVersion", feedServerVersion, "chainId", chainId, "requestedSeqNum", nextSeqNum)
 
@@ -371,6 +488,8 @@ func (bc *BroadcastClient) startBackgroundReader(earlyFrameData io.Reader) {
 		sourcesDisconnectedGauge.Inc(1)
 		backoffDuration := bc.config().ReconnectInitialBackoff
 		flateReader := wsbroadcastserver.NewFlateReader()
+		// Log should be error instead of debug if first attempt fails
+		lastConnectionResetByPeerErrorTime := time.Now().Add(-2 * time.Minute)
 		for {
 			select {
 			case <-ctx.Done():
@@ -391,6 +510,13 @@ func (bc *BroadcastClient) startBackgroundReader(earlyFrameData io.Reader) {
 					log.Error("Server connection timed out without receiving data", "url", bc.websocketUrl, "err", err)
 				} else if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 					log.Warn("readData returned EOF", "url", bc.websocketUrl, "opcode", int(op), "err", err)
+				} else if strings.Contains(err.Error(), "connection reset by peer") {
+					logLevel := log.Warn
+					if time.Since(lastConnectionResetByPeerErrorTime) <= time.Minute {
+						logLevel = log.Error
+					}
+					lastConnectionResetByPeerErrorTime = time.Now()
+					logLevel("error calling readData", "url", bc.websocketUrl, "opcode", int(op), "err", err)
 				} else {
 					log.Error("error calling readData", "url", bc.websocketUrl, "opcode", int(op), "err", err)
 				}
@@ -401,6 +527,14 @@ func (bc *BroadcastClient) startBackgroundReader(earlyFrameData io.Reader) {
 					sourcesDisconnectedGauge.Inc(1)
 				}
 				_ = bc.conn.Close()
+
+				// Skip backoff for first reconnection attempt
+				if bc.firstReconnectAttempt {
+					bc.firstReconnectAttempt = false
+					log.Info("First reconnection attempt, skipping backoff", "url", bc.websocketUrl)
+					earlyFrameData = bc.retryConnect(ctx)
+					continue
+				}
 				timer := time.NewTimer(backoffDuration)
 				if backoffDuration < bc.config().ReconnectMaximumBackoff {
 					backoffDuration *= 2
@@ -429,6 +563,7 @@ func (bc *BroadcastClient) startBackgroundReader(earlyFrameData io.Reader) {
 					sourcesDisconnectedGauge.Dec(1)
 					sourcesConnectedGauge.Inc(1)
 					bc.adjustCount(1)
+					bc.firstReconnectAttempt = true
 				}
 				if len(res.Messages) > 0 {
 					log.Debug("received batch item", "count", len(res.Messages), "first seq", res.Messages[0].SequenceNumber)
@@ -455,6 +590,10 @@ func (bc *BroadcastClient) startBackgroundReader(earlyFrameData io.Reader) {
 							bc.nextSeqNum = message.SequenceNumber + 1
 						}
 						if err := bc.txStreamer.AddBroadcastMessages(res.Messages); err != nil {
+							if errors.Is(err, TransactionStreamerBlockCreationStopped) {
+								log.Info("stopping block creation in broadcast client because transaction streamer has stopped")
+								return
+							}
 							log.Error("Error adding message from Sequencer Feed", "err", err)
 						}
 					}
@@ -479,7 +618,7 @@ func (bc *BroadcastClient) isShuttingDown() bool {
 
 func (bc *BroadcastClient) retryConnect(ctx context.Context) io.Reader {
 	maxWaitDuration := 15 * time.Second
-	waitDuration := 500 * time.Millisecond
+	var waitDuration time.Duration = 0 // Don't wait for first reconnect
 	bc.retrying = true
 
 	for !bc.isShuttingDown() {

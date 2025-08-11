@@ -3,20 +3,25 @@ package arbtest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
+	"net/http"
 	"os/exec"
 	"testing"
 	"time"
 
-	lightclient "github.com/EspressoSystems/espresso-network-go/light-client"
+	lightclient "github.com/EspressoSystems/espresso-network/sdks/go/light-client"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/rlp"
 
+	"github.com/offchainlabs/nitro/arbnode"
 	"github.com/offchainlabs/nitro/arbutil"
+	"github.com/offchainlabs/nitro/espresso/submitter"
 	"github.com/offchainlabs/nitro/solgen/go/bridgegen"
 	"github.com/offchainlabs/nitro/validator/server_api"
 	"github.com/offchainlabs/nitro/validator/valnode"
@@ -50,12 +55,11 @@ func runEspresso() func() {
 		"espresso-dev-node",
 	}
 	invocation = append(invocation, nodes...)
-	procees := exec.Command("docker", invocation...)
-	procees.Dir = workingDir
+	proceeds := exec.Command("docker", invocation...)
+	proceeds.Dir = workingDir
 
 	go func() {
-		if err := procees.Run(); err != nil {
-			log.Error(err.Error())
+		if err := proceeds.Run(); err != nil {
 			panic(err)
 		}
 	}()
@@ -302,20 +306,6 @@ func TestEspressoE2E(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-		// Disconnect the container from the network to ensure requests to the dev node
-		// don't just hang but actually fail.
-		p = exec.Command(
-			"docker",
-			"network",
-			"disconnect",
-			"espresso-e2e_default",
-			"espresso-e2e-espresso-dev-node-1",
-		)
-		err = p.Run()
-		if err != nil {
-			panic(err)
-		}
-
 	}
 	pauseEspresso()
 
@@ -324,22 +314,10 @@ func TestEspressoE2E(t *testing.T) {
 
 	log.Info("Resuming espresso node")
 	unpauseEspresso := func() {
-		// reconnect the network first
-		p := exec.Command(
-			"docker",
-			"network",
-			"connect",
-			"espresso-e2e_default",
-			"espresso-e2e-espresso-dev-node-1",
-		)
-		err := p.Run()
-		if err != nil {
-			panic(err)
-		}
 		// resume the dev node
-		p = exec.Command("docker", "compose", "unpause")
+		p := exec.Command("docker", "compose", "unpause")
 		p.Dir = workingDir
-		err = p.Run()
+		err := p.Run()
 		if err != nil {
 			panic(err)
 		}
@@ -371,9 +349,43 @@ func TestEspressoE2E(t *testing.T) {
 		return balance4.Cmp((&big.Int{}).Add(transferAmount, transferAmount)) >= 0
 	})
 	Require(t, err)
+
+	// Now send the transaction for message pos 0, the message position 0 should have not been sent to espresso
+	// because its a genesis message which originates on L1
+	fetcher := func(pos arbutil.MessageIndex) ([]byte, error) {
+		msg, err := l2Node.ConsensusNode.TxStreamer.GetMessage(0)
+		Require(t, err)
+		b, err := rlp.EncodeToBytes(msg)
+		Require(t, err)
+		return b, err
+	}
+
+	payload, _ := arbutil.BuildRawHotShotPayload([]arbutil.MessageIndex{0}, fetcher, 900*1024)
+	payload, err = arbutil.SignHotShotPayload(payload, func([]byte) ([]byte, error) {
+		return []byte{}, nil
+	})
+	Require(t, err)
+
+	// Submit the transaction to hotshot
+	espressoSubmitter := arbnode.GetEspressoSubmitter(l2Node.ConsensusNode.TxStreamer)
+	pollingEspressoSubmitter, castOk := espressoSubmitter.(*submitter.PollingEspressoSubmitter)
+
+	if !castOk {
+		t.Fatal("Expected espresso submitter to be of type PollingEspressoSubmitter")
+	}
+
+	txhash, err := pollingEspressoSubmitter.ResubmitEspressoTransactions(ctx, arbutil.SubmittedEspressoTx{Hash: "", Pos: []arbutil.MessageIndex{0}, Payload: payload})
+	Require(t, err)
+	// Check if the txHash is already finalized in hotshot
+	// curl hotshot availability endpoint and this transaction should not be in the response
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:41000/availability/transaction/hash/%s", txhash))
+	Require(t, err)
+	if resp.StatusCode == 200 {
+		t.Fatal("Transaction should not be in the response")
+	}
 }
 
-func TestEspressoE2EWithBlobs(t *testing.T) {
+func TestEspressoWithBlobs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -487,4 +499,13 @@ func checkTransferTxOnL2(
 		}
 		return false
 	})
+}
+
+// system_tests/espresso_e2e_test.go:24:2: "github.com/offchainlabs/nitro/espresso/submitter" imported and not used (typecheck)
+//
+//	"github.com/offchainlabs/nitro/espresso/submitter"
+//	^
+func UnusedSubmitter() submitter.EspressoSubmitter {
+	var a submitter.EspressoSubmitter
+	return a
 }

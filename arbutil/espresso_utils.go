@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"time"
 
-	espressoTypes "github.com/EspressoSystems/espresso-network-go/types"
+	espressoTypes "github.com/EspressoSystems/espresso-network/sdks/go/types"
 	"github.com/ccoveille/go-safecast"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -17,9 +18,10 @@ const LEN_SIZE int = 8
 const INDEX_SIZE int = 8
 
 type SubmittedEspressoTx struct {
-	Hash    string
-	Pos     []MessageIndex
-	Payload []byte
+	Hash        string
+	Pos         []MessageIndex
+	Payload     []byte
+	SubmittedAt time.Time `rlp:"optional"`
 }
 
 func BuildRawHotShotPayload(
@@ -139,6 +141,10 @@ func ParseHotShotPayload(payload []byte) (signature []byte, userDataHash []byte,
 		// Extract the message
 		message := payload[currentPos : currentPos+messageSize]
 		currentPos += messageSize
+		if len(message) == 0 {
+			// If the message has a size of 0, skip adding it to the list.
+			continue
+		}
 
 		indices = append(indices, index)
 		messages = append(messages, message)

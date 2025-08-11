@@ -1,5 +1,5 @@
 # Copyright 2021-2024, Offchain Labs, Inc.
-# For license information, see https://github.com/OffchainLabs/nitro/blob/master/LICENSE
+# For license information, see https://github.com/OffchainLabs/nitro/blob/master/LICENSE.md
 
 # Docker builds mess up file timestamps. Then again, in docker builds we never
 # have to update an existing file. So - for docker, convert all dependencies
@@ -167,29 +167,6 @@ stylus_benchmarks = $(wildcard $(stylus_dir)/*.toml $(stylus_dir)/src/*.rs) $(st
 CBROTLI_WASM_BUILD_ARGS ?=-d
 
 
-ESPRESSO_NETWORK_GO_VER ?= 0.0.36
-ESPRESSO_TAR = espresso-network-go-$(ESPRESSO_NETWORK_GO_VER).tar.gz
-ESPRESSO_URL = https://github.com/EspressoSystems/espresso-network-go/archive/refs/tags/v$(ESPRESSO_NETWORK_GO_VER).tar.gz
-ESPRESSO_DIR = espresso-network-go
-
-# Download the tarball
-$(ESPRESSO_TAR):
-	curl -L -o $@ $(ESPRESSO_URL)
-
-# Extract into target directory (strip the top-level folder)
-$(ESPRESSO_DIR): $(ESPRESSO_TAR)
-	@echo "Extracting $(ESPRESSO_TAR) into $(ESPRESSO_DIR)/..."
-	rm -rf $(ESPRESSO_DIR)
-	mkdir -p $(ESPRESSO_DIR)
-	tar -xzf $(ESPRESSO_TAR) --strip-components=1 -C $(ESPRESSO_DIR)
-
-espresso_crypto_dir = $(ESPRESSO_DIR)/verification/rust
-espresso_crypto_files = $(wildcard $(espresso_crypto_dir)/*.toml $(espresso_crypto_dir)/src/*.rs)
-espresso_crypto_lib = $(output_root)/lib/libespresso_crypto_helper
-espresso_crypto_filename = libespresso_crypto_helper.so
-espresso_target_lib = $(ESPRESSO_DIR)/target/lib
-
-
 # Normalize architecture names
 ifeq ($(UNAME_M),arm64)
     # Apple Silicon reports as arm64, but Rust uses aarch64
@@ -224,16 +201,12 @@ else
 	export LD_LIBRARY_PATH := $(shell pwd)/target/lib:$LD_LIBRARY_PATH
 endif
 
+CBROTLI_WASM_BUILD_ARGS ?=-d
 
 # user targets
 .PHONY: build-espresso-crypto-lib
-build-espresso-crypto-lib: $(ESPRESSO_DIR)
-	mkdir -p `dirname $(espresso_crypto_lib)`
-	cargo build --release --manifest-path $(espresso_crypto_dir)/Cargo.toml
-	mkdir -p $(espresso_target_lib)
-	install $(espresso_crypto_dir)/target/release/libespresso_crypto_helper.$(LIB_EXT) \
-		$(espresso_target_lib)/libespresso_crypto_helper-$(TRIPLE).$(LIB_EXT)
-	install $(espresso_crypto_dir)/target/release/$(espresso_crypto_filename) $(output_root)/lib/libespresso_crypto_helper-$(TRIPLE).$(LIB_EXT)
+build-espresso-crypto-lib:
+	./scripts/prepare-espresso-crypto-helper
 
 aws_nsm_dir = ./aws-nitro-enclaves-nsm-api
 aws_nsm_files = $(wildcard $(aws_nsm_dir)/*.toml $(aws_nsm_dir)/src/*.rs)
@@ -259,7 +232,7 @@ all: build build-replay-env test-gen-proofs
 	@touch .make/all
 
 .PHONY: build
-build: $(patsubst %,$(output_root)/bin/%, nitro deploy relay daserver autonomous-auctioneer bidder-client datool mockexternalsigner seq-coordinator-invalidate nitro-val seq-coordinator-manager dbconv)
+build: $(patsubst %,$(output_root)/bin/%, nitro deploy relay daprovider daserver autonomous-auctioneer bidder-client datool mockexternalsigner seq-coordinator-invalidate nitro-val seq-coordinator-manager dbconv)
 	@printf $(done)
 
 .PHONY: build-node-deps
@@ -333,7 +306,12 @@ test-go-stylus: test-go-deps
 
 .PHONY: test-go-redis
 test-go-redis: test-go-deps
-	TEST_REDIS=redis://localhost:6379/0 gotestsum --format short-verbose --no-color=false -- -p 1 -run TestRedis ./system_tests/... ./arbnode/...
+	gotestsum --format short-verbose --no-color=false -- -p 1 -run TestRedis ./system_tests/... ./arbnode/... -- --test_redis=redis://localhost:6379/0
+	@printf $(done)
+
+.PHONY: test-go-gas-dimensions
+test-go-gas-dimensions: test-go-deps
+	gotestsum --format short-verbose --no-color=false -- -timeout 120m ./system_tests/... -run "TestDim(Log|TxOp)" -tags gasdimensionstest
 	@printf $(done)
 
 .PHONY: test-gen-proofs
@@ -372,6 +350,7 @@ clean:
 	rm -rf arbitrator/wasm-testsuite/tests
 	rm -rf $(output_root)
 	rm -f contracts/test/prover/proofs/*.json contracts/test/prover/spec-proofs/*.json
+	rm -f contracts-legacy/test/prover/proofs/*.json contracts-legacy/test/prover/spec-proofs/*.json
 	rm -rf arbitrator/target
 	rm -rf arbitrator/wasm-libraries/target
 	rm -f arbitrator/wasm-libraries/soft-float/soft-float.wasm
@@ -382,6 +361,8 @@ clean:
 	rm -rf arbitrator/stylus/tests/*/target/ arbitrator/stylus/tests/*/*.wasm
 	rm -rf brotli/buildfiles
 	@rm -rf contracts/build contracts/cache solgen/go/
+	@rm -rf contracts-legacy/build contracts-legacy/cache
+	@rm -rf contracts-local/out contracts-local/forge-cache
 	@rm -f .make/*
 	rm -rf brotli/buildfiles
 	cargo clean --manifest-path $(aws_nsm_dir)/Cargo.toml
@@ -408,6 +389,9 @@ $(output_root)/bin/deploy: $(DEP_PREDICATE) build-node-deps
 
 $(output_root)/bin/relay: $(DEP_PREDICATE) build-node-deps
 	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/relay"
+
+$(output_root)/bin/daprovider: $(DEP_PREDICATE) build-node-deps
+	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/daprovider"
 
 $(output_root)/bin/daserver: $(DEP_PREDICATE) build-node-deps
 	go build $(GOLANG_PARAMS) -o $@ "$(CURDIR)/cmd/daserver"
@@ -675,7 +659,6 @@ contracts/test/prover/proofs/%.json: $(arbitrator_cases)/%.wasm $(prover_bin)
 	golangci-lint run --disable-all -E gofmt --fix
 	cargo fmt -p arbutil -p prover -p jit -p stylus --manifest-path arbitrator/Cargo.toml -- --check
 	cargo fmt --all --manifest-path arbitrator/wasm-testsuite/Cargo.toml -- --check
-	cargo fmt --all --manifest-path arbitrator/langs/rust/Cargo.toml -- --check
 	yarn --cwd contracts prettier:solidity
 	@touch $@
 
@@ -692,14 +675,20 @@ contracts/test/prover/proofs/%.json: $(arbitrator_cases)/%.wasm $(prover_bin)
 	go run solgen/gen.go
 	@touch $@
 
-.make/solidity: $(DEP_PREDICATE) safe-smart-account/contracts/*/*.sol safe-smart-account/contracts/*.sol contracts/src/*/*.sol .make/yarndeps $(ORDER_ONLY_PREDICATE) .make
+.make/solidity: $(DEP_PREDICATE) safe-smart-account/contracts/*/*.sol safe-smart-account/contracts/*.sol contracts/src/*/*.sol contracts-legacy/src/*/*.sol contracts-local/src/*/*.sol contracts-local/gas-dimensions/src/*.sol .make/yarndeps $(ORDER_ONLY_PREDICATE) .make
 	yarn --cwd safe-smart-account build
-	yarn --cwd contracts build:all
+	yarn --cwd contracts build
+	yarn --cwd contracts build:forge:yul
+	yarn --cwd contracts-legacy build
+	yarn --cwd contracts-legacy build:forge:yul
+	make -C contracts-local build
 	@touch $@
 
-.make/yarndeps: $(DEP_PREDICATE) contracts/package.json contracts/yarn.lock $(ORDER_ONLY_PREDICATE) .make
+.make/yarndeps: $(DEP_PREDICATE) */package.json */yarn.lock $(ORDER_ONLY_PREDICATE) .make
 	yarn --cwd safe-smart-account install
 	yarn --cwd contracts install
+	yarn --cwd contracts-legacy install
+	make -C contracts-local install
 	@touch $@
 
 .make/cbrotli-lib: $(DEP_PREDICATE) $(ORDER_ONLY_PREDICATE) .make

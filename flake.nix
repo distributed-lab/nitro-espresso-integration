@@ -21,6 +21,7 @@
           nodejs = prev.nodejs_18;
           yarn = (prev.yarn.override { inherit nodejs; });
           pnpm = (prev.pnpm.override { inherit nodejs; });
+          golangci-lint = final.callPackage ./golangci-lint.nix {};
         })
         foundry.overlay
       ];
@@ -171,6 +172,12 @@
 
                 # provides abigen
                 go-ethereum
+
+                # Needed to avoid some error on Linux related to glibc
+                git
+
+                # just
+                just
 
                 pre-commit
               ] ++ lib.optionals stdenv.isDarwin [

@@ -106,7 +106,7 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 		rootARN.Resource = "root"
 
 		kmsKeyPolicy := defaultEnclaveKMSKeyPolicies(rootARN.String(), safeStringDeref(getCallerIdentityOutput.Arn), map[string]string{
-			nsm.PCRxCondition(0): hex.EncodeToString(pcr0Actual),
+			nsm.PCRxCondition(0): encodeToString(pcr0Actual),
 		})
 
 		createKeyOutput, err := kmsEnclaveClient.CreateKey(context.Background(), &kms.CreateKeyInput{
@@ -318,4 +318,11 @@ func safeStringDeref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// TODO: I don't know why, but golangci-lint raise warning,
+// because it think that 'encoding/hex' is unused. Since warning
+// don't allow to commit code, here is quick fix
+func encodeToString(src []byte) string {
+	return hex.EncodeToString(src)
 }
