@@ -208,20 +208,6 @@ CBROTLI_WASM_BUILD_ARGS ?=-d
 build-espresso-crypto-lib:
 	./scripts/prepare-espresso-crypto-helper
 
-aws_nsm_dir = ./aws-nitro-enclaves-nsm-api
-aws_nsm_files = $(wildcard $(aws_nsm_dir)/*.toml $(aws_nsm_dir)/src/*.rs)
-aws_nsm_lib = $(output_root)/lib/libnsm.a
-
-.PHONY: build-aws-nsm-lib
-build-aws-nsm-lib: $(aws_nsm_lib)
-
-$(aws_nsm_lib): $(DEP_PREDICATE) $(aws_nsm_files)
-	mkdir -p `dirname $(aws_nsm_lib)`
-	cargo build --release --manifest-path $(aws_nsm_dir)/Cargo.toml -p nsm-lib
-	install $(aws_nsm_dir)/target/release/libnsm.a $@
-	mkdir -p $(output_root)/pkgconfig
-	cp ./pkgconfig/libnsm.pc $(output_root)/pkgconfig
-
 .PHONY: push
 push: lint test-go .make/fmt
 	@printf "%bdone building %s%b\n" $(color_pink) $$(expr $$(echo $? | wc -w) - 1) $(color_reset)
@@ -236,10 +222,7 @@ build: $(patsubst %,$(output_root)/bin/%, nitro deploy relay daprovider daserver
 	@printf $(done)
 
 .PHONY: build-node-deps
-build-node-deps: $(go_source) build-prover-header build-prover-lib build-jit .make/solgen .make/cbrotli-lib build-espresso-crypto-lib build-aws-nsm-lib
-	@for file in $(output_root)/pkgconfig/*.pc; do \
-		sed -i 's/\/path\/to\/lib/$(sed_escaped_output_root)\/lib/g' "$$file"; \
-	done
+build-node-deps: $(go_source) build-prover-header build-prover-lib build-jit .make/solgen .make/cbrotli-lib build-espresso-crypto-lib
 
 .PHONY: test-go-deps
 test-go-deps: \
@@ -365,7 +348,6 @@ clean:
 	@rm -rf contracts-local/out contracts-local/forge-cache
 	@rm -f .make/*
 	rm -rf brotli/buildfiles
-	cargo clean --manifest-path $(aws_nsm_dir)/Cargo.toml
 	@rm -f $(output_root)/lib/$(espresso_crypto_filename)
 	rm -f $(ESPRESSO_TAR)
 	rm -rf $(ESPRESSO_DIR)
