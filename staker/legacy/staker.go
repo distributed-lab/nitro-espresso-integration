@@ -96,7 +96,6 @@ type L1ValidatorConfig struct {
 	ParentChainWallet         genericconf.WalletConfig    `koanf:"parent-chain-wallet"`
 	LogQueryBatchSize         uint64                      `koanf:"log-query-batch-size" reload:"hot"`
 	EnableFastConfirmation    bool                        `koanf:"enable-fast-confirmation"`
-	EnableAWSNitro            bool                        `koanf:"enable-aws-nitro"`
 
 	strategy    StakerStrategy
 	gasRefunder common.Address
@@ -172,7 +171,6 @@ var DefaultL1ValidatorConfig = L1ValidatorConfig{
 	ParentChainWallet:         DefaultValidatorL1WalletConfig,
 	LogQueryBatchSize:         0,
 	EnableFastConfirmation:    false,
-	EnableAWSNitro:            false,
 }
 
 var TestL1ValidatorConfig = L1ValidatorConfig{
@@ -195,7 +193,6 @@ var TestL1ValidatorConfig = L1ValidatorConfig{
 	ParentChainWallet:         DefaultValidatorL1WalletConfig,
 	LogQueryBatchSize:         0,
 	EnableFastConfirmation:    false,
-	EnableAWSNitro:            false,
 }
 
 var DefaultValidatorL1WalletConfig = genericconf.WalletConfig{
@@ -226,7 +223,6 @@ func L1ValidatorConfigAddOptions(prefix string, f *flag.FlagSet) {
 	DangerousConfigAddOptions(prefix+".dangerous", f)
 	genericconf.WalletConfigAddOptions(prefix+".parent-chain-wallet", f, DefaultL1ValidatorConfig.ParentChainWallet.Pathname)
 	f.Bool(prefix+".enable-fast-confirmation", DefaultL1ValidatorConfig.EnableFastConfirmation, "enable fast confirmation")
-	f.Bool(prefix+".enable-aws-nitro", DefaultL1ValidatorConfig.EnableAWSNitro, "enable aws nitro")
 }
 
 type DangerousConfig struct {

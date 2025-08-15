@@ -54,6 +54,7 @@ import (
 	"github.com/offchainlabs/nitro/cmd/genericconf"
 	"github.com/offchainlabs/nitro/cmd/util"
 	"github.com/offchainlabs/nitro/cmd/util/confighelpers"
+	"github.com/offchainlabs/nitro/cmd/util/integrityattestation"
 	"github.com/offchainlabs/nitro/daprovider"
 	"github.com/offchainlabs/nitro/daprovider/das"
 	"github.com/offchainlabs/nitro/execution/gethexec"
@@ -228,6 +229,7 @@ func mainImpl() int {
 	}
 
 	var dataSigner signature.DataSignerFunc
+	var snapshotSigner signature.DataSignerFunc
 	var l1TransactionOptsValidator *bind.TransactOpts
 	var l1TransactionOptsBatchPoster *bind.TransactOpts
 	// If sequencer and signing is enabled or batchposter is enabled without
@@ -248,6 +250,16 @@ func mainImpl() int {
 	defaultBatchPosterL1WalletConfig := arbnode.DefaultBatchPosterL1WalletConfig
 	defaultBatchPosterL1WalletConfig.ResolveDirectoryNames(nodeConfig.Persistent.Chain)
 
+	nodeConfig.Node.EspressoCaffNode.ResolveDirectoryNames(nodeConfig.Persistent.Chain)
+
+	if nodeConfig.Node.EspressoCaffNode.Enable {
+		_, snapshotSigner, err = integrityattestation.ReadEnclavePrivateKey(nodeConfig.Node.EspressoCaffNode.KeyPairAttestationsPath)
+		if err != nil {
+			flag.Usage()
+			log.Crit("error reading enclave private key for Espresso Caff node", "path", nodeConfig.Node.EspressoCaffNode.KeyPairAttestationsPath, "err", err)
+		}
+	}
+
 	if sequencerNeedsKey || nodeConfig.Node.BatchPoster.ParentChainWallet.OnlyCreateKey {
 		l1TransactionOptsBatchPoster, dataSigner, err = util.OpenWallet("l1-batch-poster", &nodeConfig.Node.BatchPoster.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
 		if err != nil {
@@ -259,24 +271,13 @@ func mainImpl() int {
 		}
 	}
 	if validatorNeedsKey || nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
-		if nodeConfig.Node.Staker.EnableAWSNitro {
-			l1TransactionOptsValidator, err = util.OpenEnclaveValidatorWallet("l1-validator", &nodeConfig.Node.Staker.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
-			if err != nil {
-				flag.Usage()
-				log.Crit("error opening Validator enclave parent chain wallet", "path", nodeConfig.Node.Staker.ParentChainWallet.Pathname, "err", err)
-			}
-			if nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
-				return 0
-			}
-		} else {
-			l1TransactionOptsValidator, _, err = util.OpenWallet("l1-validator", &nodeConfig.Node.Staker.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
-			if err != nil {
-				flag.Usage()
-				log.Crit("error opening Validator parent chain wallet", "path", nodeConfig.Node.Staker.ParentChainWallet.Pathname, "account", nodeConfig.Node.Staker.ParentChainWallet.Account, "err", err)
-			}
-			if nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
-				return 0
-			}
+		l1TransactionOptsValidator, _, err = util.OpenWallet("l1-validator", &nodeConfig.Node.Staker.ParentChainWallet, new(big.Int).SetUint64(nodeConfig.ParentChain.ID))
+		if err != nil {
+			flag.Usage()
+			log.Crit("error opening Validator parent chain wallet", "path", nodeConfig.Node.Staker.ParentChainWallet.Pathname, "account", nodeConfig.Node.Staker.ParentChainWallet.Account, "err", err)
+		}
+		if nodeConfig.Node.Staker.ParentChainWallet.OnlyCreateKey {
+			return 0
 		}
 	}
 
@@ -575,6 +576,7 @@ func mainImpl() int {
 		l1TransactionOptsValidator,
 		l1TransactionOptsBatchPoster,
 		dataSigner,
+		snapshotSigner,
 		fatalErrChan,
 		new(big.Int).SetUint64(nodeConfig.ParentChain.ID),
 		blobReader,
