@@ -743,3 +743,12 @@ func (m *MockSeqInbox) MaxTimeVariation(ctx context.Context) (*big.Int, *big.Int
 func (m *MockSeqInbox) TotalDelayedMessagesRead(ctx context.Context) (*big.Int, error) {
 	return m.seqInbox.TotalDelayedMessagesRead(&bind.CallOpts{Context: ctx})
 }
+
+// system_tests/caff_node_test.go:25:2: "github.com/offchainlabs/nitro/espressostreamer" imported and not used (typecheck)
+//
+//	"github.com/offchainlabs/nitro/espressostreamer"
+//	^
+func UnusedEspressostreamer() espressostreamer.EspressoStreamerInterface {
+	var a espressostreamer.EspressoStreamerInterface
+	return a
+}

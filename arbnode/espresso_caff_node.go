@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
+	"path/filepath"
 	"time"
 
 	espressoClient "github.com/EspressoSystems/espresso-network/sdks/go/client"
@@ -20,6 +22,7 @@ import (
 	"github.com/offchainlabs/nitro/espressotee"
 	"github.com/offchainlabs/nitro/execution/gethexec"
 	"github.com/offchainlabs/nitro/util/headerreader"
+	"github.com/offchainlabs/nitro/util/signature"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
 )
 
@@ -44,6 +47,15 @@ type EspressoCaffNodeConfig struct {
 	// Force Inclusion Checker
 	ForceInclusionChecker ForceInclusionCheckerConfig `koanf:"force-inclusion-checker"`
 	StateChecker          StateCheckerConfig          `koanf:"state-checker"`
+
+	KeyPairAttestationsPath string `koanf:"key-pair-attestations-path"`
+}
+
+func (c *EspressoCaffNodeConfig) ResolveDirectoryNames(chain string) {
+	// Make wallet directories relative to chain directory if specified and not already absolute
+	if len(c.KeyPairAttestationsPath) != 0 && !filepath.IsAbs(c.KeyPairAttestationsPath) {
+		c.KeyPairAttestationsPath = path.Join(chain, c.KeyPairAttestationsPath)
+	}
 }
 
 type DangerousCaffNodeConfig struct {
@@ -68,12 +80,13 @@ var DefaultEspressoCaffNodeConfig = EspressoCaffNodeConfig{
 	RecordPerformance:       false,
 	// Setting these values to the default
 	// values set by Arbitrum
-	WaitForFinalization:  false,
-	WaitForConfirmations: true,
-	RequiredBlockDepth:   20,
-	BlocksToRead:         10000,
-	Dangerous:            DefaultDangerousCaffNodeConfig,
-	FromBlock:            1,
+	WaitForFinalization:     false,
+	WaitForConfirmations:    true,
+	RequiredBlockDepth:      20,
+	BlocksToRead:            10000,
+	Dangerous:               DefaultDangerousCaffNodeConfig,
+	FromBlock:               1,
+	KeyPairAttestationsPath: "caff_node_key_pair_attestations",
 }
 
 func EspressoCaffNodeConfigAddOptions(prefix string, f *flag.FlagSet) {
@@ -92,6 +105,7 @@ func EspressoCaffNodeConfigAddOptions(prefix string, f *flag.FlagSet) {
 	f.Uint64(prefix+".required-block-depth", DefaultEspressoCaffNodeConfig.RequiredBlockDepth, "Configures the required block depth/number of confirmations on the parent chain that a delayed message is required to have before this Caff node will add it to it's state")
 	f.Uint64(prefix+".blocks-to-read", DefaultEspressoCaffNodeConfig.BlocksToRead, "Configures the number of blocks to read from the parent chain for delayed messages")
 	f.Uint64(prefix+".from-block", DefaultEspressoCaffNodeConfig.FromBlock, "Configures the block number to start reading delayed messages from")
+	f.String(prefix+".key-pair-attestations-path", DefaultEspressoCaffNodeConfig.KeyPairAttestationsPath, "Path to attestation documents with KMSKeyID, EncryptedPrivateKey attestations")
 	DangerousCaffNodeConfigAddOptions(prefix+".dangerous", f)
 
 	EspressoForceInclusionConfigAddOptions(prefix+".force-inclusion-checker", f)
@@ -109,6 +123,7 @@ type EspressoCaffNode struct {
 	stopwaiter.StopWaiter
 
 	executionEngine  *gethexec.ExecutionEngine
+	snapshotSigner   signature.DataSignerFunc
 	espressoStreamer espressostreamer.EspressoStreamerInterface
 
 	configFetcher EspressoCaffNodeConfigFetcher
@@ -126,6 +141,7 @@ type EspressoCaffNode struct {
 
 func NewEspressoCaffNode(
 	configFetcher EspressoCaffNodeConfigFetcher,
+	snapshotSigner signature.DataSignerFunc,
 	execEngine *gethexec.ExecutionEngine,
 	delayedBridge *DelayedBridge,
 	l1Reader *headerreader.HeaderReader,
@@ -218,6 +234,7 @@ func NewEspressoCaffNode(
 	return &EspressoCaffNode{
 		configFetcher:         configFetcher,
 		executionEngine:       execEngine,
+		snapshotSigner:        snapshotSigner,
 		delayedMessageFetcher: delayedMessageFetcher,
 		espressoStreamer:      espressoStreamer,
 		db:                    db,
