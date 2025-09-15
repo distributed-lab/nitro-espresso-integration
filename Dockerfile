@@ -111,19 +111,6 @@ COPY --from=contracts-builder workspace/contracts-legacy/build/contracts/src/pre
 COPY --from=contracts-builder workspace/.make/ .make/
 RUN PATH="$PATH:/usr/local/go/bin" NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-wasm-bin
 
-FROM rust:1.81.0-slim-bookworm AS nsmlib-builder
-WORKDIR /workspace
-RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install -y make
-COPY aws-nitro-enclaves-nsm-api aws-nitro-enclaves-nsm-api 
-COPY ./Makefile ./
-COPY ./pkgconfig ./pkgconfig
-RUN NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-aws-nsm-lib
-
-FROM scratch AS nsmlib-export
-COPY --from=nsmlib-builder /workspace/target/ /
-
 FROM rust:1.84.1-slim-bookworm AS prover-header-builder
 WORKDIR /workspace
 RUN export DEBIAN_FRONTEND=noninteractive && \
@@ -300,7 +287,6 @@ COPY --from=contracts-builder workspace/safe-smart-account/build/ safe-smart-acc
 COPY --from=contracts-builder workspace/espresso-tee-contracts/out/ espresso-tee-contracts/out/
 COPY --from=contracts-builder workspace/.make/ .make/
 COPY --from=prover-header-export / target/
-COPY --from=nsmlib-export / target/
 COPY --from=brotli-library-export / target/
 COPY --from=prover-export / target/
 RUN mkdir -p target/bin
@@ -415,22 +401,17 @@ USER user
 
 FROM golang:1.23.1-bookworm AS nitro-attestation-cli-builder
 WORKDIR /workspace
-COPY --from=nsmlib-export / target/
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y git && \
     git clone https://github.com/distributed-lab/enclave-extras.git && \
     cd enclave-extras && \
-    git checkout v0.1.1
+    git checkout v0.1.2
 RUN mkdir -p /workspace/target && \
-    cp -R /workspace/enclave-extras/nitro-attestation-cli/* /workspace && \
-    cp -R /workspace/pkgconfig /workspace/target/
-RUN for file in /workspace/target/pkgconfig/*.pc; do \
-    sed -i 's/\/path\/to\/lib/\/workspace\/target\/lib/g' "$file"; \
-    done
+    cp -R /workspace/enclave-extras/nitro-attestation-cli/* /workspace
 RUN go mod download
 RUN mkdir -p target/bin
-RUN PKG_CONFIG_PATH=/workspace/target/pkgconfig go build -o target/bin/nitro-attestation-cli .
+RUN go build -o target/bin/nitro-attestation-cli .
 
 FROM ghcr.io/espressosystems/nitro-espresso-integration/socat:v1.7.4.4 AS socat-export
 
