@@ -80,58 +80,12 @@ sleep 5
 echo "Extend /etc/hosts"
 cat $SHARED_DIR/config/hosts >> /etc/hosts
 
-if [ -f $SHARED_DIR/config/storage_kms_key_id.coses1 ]; then
-    echo "storage_kms_key_id.coses1 exist, try to read key ID"
-    su user -c "nitro-attestation-cli document read --verify-pcr0 --user-data --input $SHARED_DIR/config/storage_kms_key_id.coses1 > /home/user/kms-key-id"
-else
-    if [ -f $SHARED_DIR/config/storage_encrypted_data_key.coses1 ]; then
-        echo "kms-key-id not exist, but encrypted-data-key exist, can't decrypt data-key"
-        exit 1
-    fi
-    echo "storage_kms_key_id.coses1 don't exist, try to create key ID"
-    su user -c "$AWS_PARAMS nitro-attestation-cli kms create-key --pcr0 > /home/user/kms-key-id"
-    echo "Ensure that key created. Some sleep..."
-    sleep 1
-    echo "Create attestation document with KMS Key ID in $SHARED_DIR/config/storage_kms_key_id.coses1"
-    su user -c "nitro-attestation-cli document create --user-data $(cat /home/user/kms-key-id | xxd -p -c 0) > $SHARED_DIR/config/storage_kms_key_id.coses1"
-fi
-
-if [ -f $SHARED_DIR/config/storage_encrypted_data_key.coses1 ]; then
-    echo "storage_encrypted_data_key.coses1 exist, try to read encrypted data key"
-    su user -c "nitro-attestation-cli document read --verify-pcr0 --user-data --input $SHARED_DIR/config/storage_encrypted_data_key.coses1 > /home/user/encrypted-data-key"
-else
-    echo "storage_encrypted_data_key.coses1 don't exist, try to encrypted data key"
-    su user -c "$AWS_PARAMS nitro-attestation-cli kms generate-data-key --key-id $(cat /home/user/kms-key-id) --number-of-bytes 32 > /home/user/encrypted-data-key"
-    echo "Create attestation document with encryped data key in $SHARED_DIR/config/storage_encrypted_data_key.coses1"
-    su user -c "nitro-attestation-cli document create --user-data $(cat /home/user/encrypted-data-key | xxd -p -c 0) > $SHARED_DIR/config/storage_encrypted_data_key.coses1"
-fi
-
-echo "Decrypte data key"
-su user -c "$AWS_PARAMS nitro-attestation-cli kms decrypt --key-id $(cat /home/user/kms-key-id) --input /home/user/encrypted-data-key > /home/user/data-key"
-
 echo "Create chain directory: /chain"
 mkdir -p /chain
 if [ ! -f $SHARED_DIR/chain.img ]; then
     echo "chain.img don't exist, exit..."
     exit 1
 fi
-
-if cryptsetup isLuks $SHARED_DIR/chain.img >/dev/null 2>&1; then
-    echo "chain.img is LUKS container, open..."
-    cryptsetup luksOpen $SHARED_DIR/chain.img chain --key-file=/home/user/data-key
-else
-    echo "chain.img is not LUKS container, format..."
-    cryptsetup luksFormat $SHARED_DIR/chain.img --key-file=/home/user/data-key --batch-mode
-    echo "Open encrypted container"
-    cryptsetup luksOpen $SHARED_DIR/chain.img chain --key-file=/home/user/data-key
-    echo "Make ext4 filesystem in encrypted container"
-    mkfs.ext4 /dev/mapper/chain
-fi
-
-echo "Mount chain to /chain"
-mount /dev/mapper/chain /chain
-chmod 777 /chain
-chown -R user:user /chain
 
 echo "Some sleep..."
 sleep 5
