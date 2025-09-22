@@ -413,6 +413,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     supervisor &&\
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /var/cache/ldconfig/aux-cache /usr/lib/python3.9/__pycache__/ /usr/lib/python3.9/*/__pycache__/ /var/log/*
+COPY ./supervisord.conf /etc/supervisor/supervisord.conf
 WORKDIR /home/user/
 COPY ./runeif.sh .
 COPY ./close_chain.sh .
