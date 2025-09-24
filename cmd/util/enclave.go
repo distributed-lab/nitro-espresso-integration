@@ -21,7 +21,8 @@ import (
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/distributed-lab/enclave-extras/attestation"
-	"github.com/distributed-lab/enclave-extras/attestation/kmshelpers"
+	"github.com/distributed-lab/enclave-extras/attestedkms"
+	"github.com/distributed-lab/enclave-extras/nitro"
 	"github.com/distributed-lab/enclave-extras/nsm"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -38,16 +39,6 @@ type KMSAttestationConfig struct {
 const (
 	awsConfigValidatorProfile = "validator"
 	enclaveWalletSuffix       = ".enclave"
-
-	// Attestation document with the validator's encrypted
-	// private key in UserData attestation doc field.
-	privateKeyFile = "private_key.coses1"
-	// Attestation document with the KMS KeyID
-	// in UserData attestation doc field.
-	kmsKeyIDFile = "kms_key_id.coses1"
-	// Attestation document with the validator's address
-	// in UserData attestation doc field.
-	addressFile = "address.coses1"
 )
 
 func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.WalletConfig, chainId *big.Int) (*bind.TransactOpts, error) {
@@ -56,12 +47,13 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 		return nil, fmt.Errorf("failed to load AWS validator config: %w", err)
 	}
 
-	stsClient := sts.NewFromConfig(awsConfig)
-	kmsEnclaveClient := kmshelpers.NewFromConfig(awsConfig)
 	kmsAttestationConfig, err := newKMSAttestationConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get KMS attestation config: %w", err)
 	}
+
+	stsClient := sts.NewFromConfig(awsConfig)
+	kmsEnclaveClient := attestedkms.NewFromConfig(awsConfig, kmsAttestationConfig.attestationDoc, kmsAttestationConfig.pk)
 
 	_, pcr0Actual, err := nsm.DescribePCR(0)
 	if err != nil {
@@ -72,9 +64,9 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 	if err := os.MkdirAll(enclaveWalletPath, 0o700); err != nil {
 		return nil, err
 	}
-	kmsKeyIDPath := path.Join(enclaveWalletPath, kmsKeyIDFile)
-	privateKeyPath := path.Join(enclaveWalletPath, privateKeyFile)
-	addressPath := path.Join(enclaveWalletPath, addressFile)
+	kmsKeyIDPath := path.Join(enclaveWalletPath, nitro.KMSKeyIDFile)
+	privateKeyPath := path.Join(enclaveWalletPath, nitro.PrivateKeyFile)
+	addressPath := path.Join(enclaveWalletPath, nitro.AddressFile)
 
 	// Read or create KMS Key
 	var kmsKeyID string
@@ -154,7 +146,7 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 				AttestationDocument:    kmsAttestationConfig.attestationDoc,
 				KeyEncryptionAlgorithm: kmstypes.KeyEncryptionMechanismRsaesOaepSha256,
 			},
-		}, kmsAttestationConfig.pk)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt private key: %w", err)
 		}
@@ -171,7 +163,7 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 				AttestationDocument:    kmsAttestationConfig.attestationDoc,
 				KeyEncryptionAlgorithm: kmstypes.KeyEncryptionMechanismRsaesOaepSha256,
 			},
-		}, kmsAttestationConfig.pk)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate secp256k1 in KMS: %w", err)
 		}
@@ -254,7 +246,7 @@ func newKMSAttestationConfig() (*KMSAttestationConfig, error) {
 }
 
 func parsePKCS8ECPrivateKey(pcks8PrivateKey []byte) (*ecdsa.PrivateKey, error) {
-	privateKeyAny, err := kmshelpers.ParsePKCS8PrivateKey(pcks8PrivateKey)
+	privateKeyAny, err := attestedkms.ParsePKCS8PrivateKey(pcks8PrivateKey)
 	if err != nil {
 		return nil, err
 	}
