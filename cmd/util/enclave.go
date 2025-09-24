@@ -55,6 +55,12 @@ func OpenEnclaveValidatorWallet(description string, walletConfig *genericconf.Wa
 		return nil, fmt.Errorf("failed to read or create Secp256k1 private key: %w", err)
 	}
 
+	// Save public key if file does not exist
+	_, err = nitro.GetAttestedPublicKey(privateKey, enclaveWalletPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save public key: %w", err)
+	}
+
 	// Save address if file does not exist
 	_, err = nitro.GetAttestedAddress(&privateKey.PublicKey, enclaveWalletPath)
 	if err != nil {
