@@ -399,32 +399,16 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
 
 USER user
 
-FROM golang:1.23.1-bookworm AS nitro-attestation-cli-builder
-WORKDIR /workspace
-RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install -y git && \
-    git clone https://github.com/distributed-lab/enclave-extras.git && \
-    cd enclave-extras && \
-    git checkout v0.1.2
-RUN mkdir -p /workspace/target && \
-    cp -R /workspace/enclave-extras/nitro-attestation-cli/* /workspace
-RUN go mod download
-RUN mkdir -p target/bin
-RUN go build -o target/bin/nitro-attestation-cli .
-
 FROM ghcr.io/espressosystems/nitro-espresso-integration/socat:v1.7.4.4 AS socat-export
 
 FROM nitro-node AS nitro-node-enclave
 USER root
 COPY --from=socat-export /socat /usr/local/bin/
-COPY --from=nitro-attestation-cli-builder /workspace/target/bin/nitro-attestation-cli /usr/local/bin/
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y \
     iproute2 \
     nfs-common \
-    cryptsetup \
     xxd \
     supervisor &&\
     apt-get clean && \
