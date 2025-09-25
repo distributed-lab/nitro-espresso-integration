@@ -228,6 +228,8 @@ github.com/distributed-lab/enclave-extras/nitro v0.0.0-20250924091216-7ce9be4c16
 github.com/distributed-lab/enclave-extras/nitro v0.0.0-20250924091216-7ce9be4c16fd/go.mod h1:qgpGh0y2PRUlfm0HIjMqVisR0CiP9mAk0zo0jGoSV9g=
 github.com/distributed-lab/enclave-extras/nitro v0.0.0-20250924131154-c9f6c2e93cd8 h1:hRVA5WhhJGMpuNbclU+fU/qWhCkQ8LYXZIY+h5cSdv4=
 github.com/distributed-lab/enclave-extras/nitro v0.0.0-20250924131154-c9f6c2e93cd8/go.mod h1:nsQ0hKwcPHVUs0qmuapqHowxXmeAGXsaTafzZnmOgzM=
+github.com/distributed-lab/enclave-extras/nitro v0.1.0 h1:ld+GR3ujF3IWwxokVHHhi4Zl1fTqjsUKsUJKN7tVhKM=
+github.com/distributed-lab/enclave-extras/nitro v0.1.0/go.mod h1:nsQ0hKwcPHVUs0qmuapqHowxXmeAGXsaTafzZnmOgzM=
 github.com/distributed-lab/enclave-extras/nsm v0.2.0 h1:exHPTGffHwuj2BYZwSo0EcOWV2Cmy2v6Q3VkbohZ4xw=
 github.com/distributed-lab/enclave-extras/nsm v0.2.0/go.mod h1:NI0pBNPy/O4lN6B9dW/1yXwBnNfaJc9OFGhpDAY0hnk=
 github.com/dlclark/regexp2 v1.4.1-0.20201116162257-a2a8dda75c91/go.mod h1:2pZnwuY/m+8K6iRw6wQdMtk+rH5tNGR1i55kozfMjCc=

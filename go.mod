@@ -87,7 +87,7 @@ require (
 	github.com/btcsuite/btcd/btcutil v1.1.5 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/cockroachdb/fifo v0.0.0-20240606204812-0bbfbd93a7ce // indirect
-	github.com/distributed-lab/enclave-extras/nitro v0.0.0-20250924131154-c9f6c2e93cd8 // indirect
+	github.com/distributed-lab/enclave-extras/nitro v0.1.0 // indirect
 	github.com/ethereum/go-verkle v0.2.2 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
