@@ -7,10 +7,7 @@ on:
   pull_request:
   push:
     branches:
-      - master
-      - develop
-      - integration
-      - celestia-integration
+      - '**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -19,7 +16,7 @@ concurrency:
 jobs:
   test:
     name: Go Tests
-    runs-on: ubuntu-24.04-8core
+    runs-on: ubuntu-latest
 
     # Creates a redis container for redis tests
     services:
@@ -44,29 +41,29 @@ jobs:
         with:
           submodules: recursive
 
-      # - uses: cargo-bins/cargo-binstall@main
-      # - name: Make more disk space available on public runner
-      #   run: |
-      #     # rmz seems to be faster at deleting files than rm
-      #     cargo binstall -y --version 2.2.0 rmz
-      #     sudo mv /home/runner/.cargo/bin/rmz /usr/local/bin/rmz
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Make more disk space available on public runner
+        run: |
+          # rmz seems to be faster at deleting files than rm
+          cargo binstall -y --version 2.2.0 rmz
+          sudo mv /home/runner/.cargo/bin/rmz /usr/local/bin/rmz
 
-      #     echo "Available storage before:"
-      #     sudo df -h
-      #     echo
-      #     sudo rmz -f /usr/share/dotnet
-      #     sudo rmz -f /usr/share/swift
-      #     sudo rmz -f /usr/share/gradle-*
-      #     sudo rmz -f /usr/share/az_*
-      #     sudo rmz -f /usr/local/lib/android
-      #     sudo rmz -f /opt/ghc
-      #     sudo rmz -f /opt/az
-      #     sudo rmz -f /opt/pipx
-      #     sudo rmz -f /opt/google
-      #     sudo rmz -f /opt/microsoft
-      #     echo "Available storage after:"
-      #     sudo df -h
-      #     echo
+          echo "Available storage before:"
+          sudo df -h
+          echo
+          sudo rmz -f /usr/share/dotnet
+          sudo rmz -f /usr/share/swift
+          sudo rmz -f /usr/share/gradle-*
+          sudo rmz -f /usr/share/az_*
+          sudo rmz -f /usr/local/lib/android
+          sudo rmz -f /opt/ghc
+          sudo rmz -f /opt/az
+          sudo rmz -f /opt/pipx
+          sudo rmz -f /opt/google
+          sudo rmz -f /opt/microsoft
+          echo "Available storage after:"
+          sudo df -h
+          echo
 
       - name: Install dependencies
         run: >
