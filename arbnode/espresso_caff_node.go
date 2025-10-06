@@ -80,12 +80,16 @@ var DefaultEspressoCaffNodeConfig = EspressoCaffNodeConfig{
 	RecordPerformance:       false,
 	// Setting these values to the default
 	// values set by Arbitrum
-	WaitForFinalization:     false,
-	WaitForConfirmations:    true,
-	RequiredBlockDepth:      20,
-	BlocksToRead:            10000,
-	Dangerous:               DefaultDangerousCaffNodeConfig,
-	FromBlock:               1,
+	WaitForFinalization:  false,
+	WaitForConfirmations: true,
+	RequiredBlockDepth:   20,
+	BlocksToRead:         10000,
+	Dangerous:            DefaultDangerousCaffNodeConfig,
+	FromBlock:            1,
+
+	ForceInclusionChecker: DefaultEspressoForceInclusionCheckerConfig,
+	StateChecker:          DefaultStateCheckerConfig,
+
 	KeyPairAttestationsPath: "caff_node_key_pair_attestations",
 }
 
