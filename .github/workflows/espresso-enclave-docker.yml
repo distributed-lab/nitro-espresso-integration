@@ -8,9 +8,7 @@ on:
     tags:
       - "v*"
     branches:
-      - integration
-      - celestia-integration
-      - release-tee-caff-node
+      - "**"
 
 permissions:
   contents: write
