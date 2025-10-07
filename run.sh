@@ -12,6 +12,9 @@ socat VSOCK-LISTEN:8004,fork,keepalive TCP:$L1_NODE,keepalive &
 socat VSOCK-LISTEN:8005,fork,keepalive TCP:$L1_BEACON_NODE,keepalive &
 # NFS Server
 socat VSOCK-LISTEN:20000,fork,keepalive TCP:$NFS_SERVER,keepalive &
+# IMDS
+socat VSOCK-LISTEN:16900,fork,keepalive TCP:169.254.169.254:80,keepalive &
+
 # Decaf query node 1
 socat VSOCK-LISTEN:8006,fork,keepalive TCP:query-0.decaf.testnet.espresso.network:443,keepalive &
 # Decaf query node 2
