@@ -7,11 +7,7 @@ on:
   pull_request:
   push:
     branches:
-      - master
-      - develop
-      - integration
-      - celestia-integration
-      - release-tee-caff-node
+      - "**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,7 +16,7 @@ concurrency:
 jobs:
   test:
     name: Go Tests
-    runs-on: ubuntu-24.04-8core
+    runs-on: ubuntu-latest
 
     # Creates a redis container for redis tests
     services:
