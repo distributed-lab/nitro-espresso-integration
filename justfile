@@ -10,3 +10,4 @@ tee-tests: build
 
 authdb-tests:
     gotestsum --format standard-verbose --packages="\$packages" -- -v -timeout 15m -p 1 ./espresso/authdb/... -run 'TestAuthDB'
+    rm -rf espresso/authdb/authdbancient
