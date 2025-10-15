@@ -1,6 +1,7 @@
 package authdb
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"errors"
 	"fmt"
@@ -423,10 +424,6 @@ func (d *AuthDB) NewBatchWithSize(size int) ethdb.Batch {
 	return d.db.NewBatchWithSize(size)
 }
 
-func (d *AuthDB) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	return d.db.NewIterator(prefix, start)
-}
-
 func (d *AuthDB) WasmDataBase() (ethdb.KeyValueStore, uint32) {
 	return d.db.WasmDataBase()
 }
@@ -440,11 +437,175 @@ func (d *AuthDB) Put(key []byte, value []byte) error {
 }
 
 func (d *AuthDB) Has(key []byte) (bool, error) {
-	// TODO: Intercepts the calls you care about
-	return d.db.Has(key)
+	_, err := d.Get(key)
+	if err != nil {
+		if dbutil.IsErrNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to Get during Has: %w", err)
+	}
+
+	return true, nil
 }
 
 func (d *AuthDB) Get(key []byte) ([]byte, error) {
+	// switch-case copied over from rawdb.database.go::InspectDatabase()
+	switch {
+	case bytes.HasPrefix(key, headerPrefix) && len(key) == (len(headerPrefix)+8+common.HashLength):
+		// headers.Add(size)
+	case bytes.HasPrefix(key, blockBodyPrefix) && len(key) == (len(blockBodyPrefix)+8+common.HashLength):
+		// bodies.Add(size)
+	case bytes.HasPrefix(key, blockReceiptsPrefix) && len(key) == (len(blockReceiptsPrefix)+8+common.HashLength):
+		// receipts.Add(size)
+	case bytes.HasPrefix(key, headerPrefix) && bytes.HasSuffix(key, headerTDSuffix):
+		// tds.Add(size)
+	case bytes.HasPrefix(key, headerPrefix) && bytes.HasSuffix(key, headerHashSuffix):
+		// numHashPairings.Add(size)
+	case bytes.HasPrefix(key, headerNumberPrefix) && len(key) == (len(headerNumberPrefix)+common.HashLength):
+		// hashNumPairings.Add(size)
+	// note: IsLegacyTrieNode is not a read op, skipping
+	// case IsLegacyTrieNode(key, it.Value()):
+	case bytes.HasPrefix(key, stateIDPrefix) && len(key) == len(stateIDPrefix)+common.HashLength:
+		// stateLookups.Add(size)
+	case IsAccountTrieNode(key):
+		// accountTries.Add(size)
+	case IsStorageTrieNode(key):
+		// storageTries.Add(size)
+	case bytes.HasPrefix(key, CodePrefix) && len(key) == len(CodePrefix)+common.HashLength:
+		// codes.Add(size)
+	case bytes.HasPrefix(key, txLookupPrefix) && len(key) == (len(txLookupPrefix)+common.HashLength):
+		// txLookups.Add(size)
+	case bytes.HasPrefix(key, SnapshotAccountPrefix) && len(key) == (len(SnapshotAccountPrefix)+common.HashLength):
+		// accountSnaps.Add(size)
+	case bytes.HasPrefix(key, SnapshotStoragePrefix) && len(key) == (len(SnapshotStoragePrefix)+2*common.HashLength):
+		// storageSnaps.Add(size)
+	case bytes.HasPrefix(key, PreimagePrefix) && len(key) == (len(PreimagePrefix)+common.HashLength):
+		// preimages.Add(size)
+	case bytes.HasPrefix(key, configPrefix) && len(key) == (len(configPrefix)+common.HashLength):
+		// metadata.Add(size)
+	case bytes.HasPrefix(key, genesisPrefix) && len(key) == (len(genesisPrefix)+common.HashLength):
+		// metadata.Add(size)
+	case bytes.HasPrefix(key, bloomBitsPrefix) && len(key) == (len(bloomBitsPrefix)+10+common.HashLength):
+		// bloomBits.Add(size)
+	case bytes.HasPrefix(key, BloomBitsIndexPrefix):
+		// bloomBits.Add(size)
+	case bytes.HasPrefix(key, skeletonHeaderPrefix) && len(key) == (len(skeletonHeaderPrefix)+8):
+		// beaconHeaders.Add(size)
+	case bytes.HasPrefix(key, CliqueSnapshotPrefix) && len(key) == 7+common.HashLength:
+		// cliqueSnaps.Add(size)
+	case bytes.HasPrefix(key, ChtTablePrefix) ||
+		bytes.HasPrefix(key, ChtIndexTablePrefix) ||
+		bytes.HasPrefix(key, ChtPrefix): // Canonical hash trie
+		// chtTrieNodes.Add(size)
+	case bytes.HasPrefix(key, BloomTrieTablePrefix) ||
+		bytes.HasPrefix(key, BloomTrieIndexPrefix) ||
+		bytes.HasPrefix(key, BloomTriePrefix): // Bloomtrie sub
+		// bloomTrieNodes.Add(size)
+
+	// Verkle trie data is detected, determine the sub-category
+	case bytes.HasPrefix(key, VerklePrefix):
+		remain := key[len(VerklePrefix):]
+		switch {
+		case IsAccountTrieNode(remain):
+			// verkleTries.Add(size)
+		case bytes.HasPrefix(remain, stateIDPrefix) && len(remain) == len(stateIDPrefix)+common.HashLength:
+			// verkleStateLookups.Add(size)
+		case bytes.Equal(remain, persistentStateIDKey):
+			// metadata.Add(size)
+		case bytes.Equal(remain, trieJournalKey):
+			// metadata.Add(size)
+		case bytes.Equal(remain, snapSyncStatusFlagKey):
+			// metadata.Add(size)
+		default:
+			// unaccounted.Add(size)
+		}
+	default:
+		for range [][]byte{
+			databaseVersionKey, headHeaderKey, headBlockKey, headFastBlockKey, headFinalizedBlockKey,
+			lastPivotKey, fastTrieProgressKey, snapshotDisabledKey, SnapshotRootKey, snapshotJournalKey,
+			snapshotGeneratorKey, snapshotRecoveryKey, txIndexTailKey, fastTxLookupLimitKey,
+			uncleanShutdownKey, badBlockKey, transitionStatusKey, skeletonSyncStatusKey,
+			persistentStateIDKey, trieJournalKey, snapshotSyncStatusKey, snapSyncStatusFlagKey,
+		} {
+			//
+		}
+	}
+
+	// TODO: decide how to deal with freezer and Ancient reads
+	// var freezers = []string{ChainFreezerName, MerkleStateFreezerName, VerkleStateFreezerName}
+	// for _, freezer := range freezers {
+	// 	switch freezer {
+	// 	case ChainFreezerName:
+	// 		info, err := inspect(ChainFreezerName, chainFreezerNoSnappy, db)
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+	// 		infos = append(infos, info)
+
+	// 	case MerkleStateFreezerName, VerkleStateFreezerName:
+	// 		datadir, err := db.AncientDatadir()
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+	// 		f, err := NewStateFreezer(datadir, freezer == VerkleStateFreezerName, true)
+	// 		if err != nil {
+	// 			continue // might be possible the state freezer is not existent
+	// 		}
+	// 		defer f.Close()
+
+	// 		info, err := inspect(freezer, stateFreezerNoSnappy, f)
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+	// 		infos = append(infos, info)
+
+	// 	default:
+	// 		return nil, fmt.Errorf("unknown freezer, supported ones: %v", freezers)
+	// 	}
+	// }
+
 	// TODO: Intercepts the calls you care about
 	return d.db.Get(key)
+}
+
+func (d *AuthDB) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+	inner := d.db.NewIterator(prefix, start)
+	it := NewAuthIterator(inner, d)
+	return &it
+}
+
+type AuthIterator struct {
+	inner ethdb.Iterator
+	db    ethdb.Database
+}
+
+func NewAuthIterator(inner ethdb.Iterator, db ethdb.Database) AuthIterator {
+	return AuthIterator{inner: inner, db: db}
+}
+
+func (it *AuthIterator) Next() bool {
+	return it.inner.Next()
+}
+
+func (it *AuthIterator) Error() error {
+	return it.inner.Error()
+}
+
+func (it *AuthIterator) Key() []byte {
+	return it.inner.Key()
+}
+
+func (it *AuthIterator) Value() []byte {
+	key := it.Key()
+
+	val, err := it.db.Get(key)
+	if err != nil {
+		log.Error("AuthRead failed during AuthIterator.Value()", "err", err)
+		return nil
+	}
+	return val
+}
+
+func (it *AuthIterator) Release() {
+	it.inner.Release()
 }

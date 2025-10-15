@@ -11,3 +11,13 @@ gotestsum \
     -p 1 \
     ./system_tests/... \
     -run 'TestEspresso'
+
+gotestsum \
+    --format short-verbose \
+    --packages="github.com/offchainlabs/nitro/espresso/authdb" \
+    -- \
+    -v \
+    -timeout 5m \
+    -p 1 \
+    ./espresso/authdb... \
+    -run 'TestAuthDB'
