@@ -424,10 +424,6 @@ func (d *AuthDB) NewBatchWithSize(size int) ethdb.Batch {
 	return d.db.NewBatchWithSize(size)
 }
 
-func (d *AuthDB) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	return d.db.NewIterator(prefix, start)
-}
-
 func (d *AuthDB) WasmDataBase() (ethdb.KeyValueStore, uint32) {
 	return d.db.WasmDataBase()
 }
@@ -441,8 +437,15 @@ func (d *AuthDB) Put(key []byte, value []byte) error {
 }
 
 func (d *AuthDB) Has(key []byte) (bool, error) {
-	// TODO: Intercepts the calls you care about
-	return d.db.Has(key)
+	_, err := d.Get(key)
+	if err != nil {
+		if dbutil.IsErrNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to Get during Has: %w", err)
+	}
+
+	return true, nil
 }
 
 func (d *AuthDB) Get(key []byte) ([]byte, error) {
@@ -565,4 +568,44 @@ func (d *AuthDB) Get(key []byte) ([]byte, error) {
 	return d.db.Get(key)
 }
 
-// TODO: what do we do with Iteratee interface?
+func (d *AuthDB) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+	inner := d.db.NewIterator(prefix, start)
+	it := NewAuthIterator(inner, d)
+	return &it
+}
+
+type AuthIterator struct {
+	inner ethdb.Iterator
+	db    ethdb.Database
+}
+
+func NewAuthIterator(inner ethdb.Iterator, db ethdb.Database) AuthIterator {
+	return AuthIterator{inner: inner, db: db}
+}
+
+func (it *AuthIterator) Next() bool {
+	return it.inner.Next()
+}
+
+func (it *AuthIterator) Error() error {
+	return it.inner.Error()
+}
+
+func (it *AuthIterator) Key() []byte {
+	return it.inner.Key()
+}
+
+func (it *AuthIterator) Value() []byte {
+	key := it.Key()
+
+	val, err := it.db.Get(key)
+	if err != nil {
+		log.Error("AuthRead failed during AuthIterator.Value()", "err", err)
+		return nil
+	}
+	return val
+}
+
+func (it *AuthIterator) Release() {
+	it.inner.Release()
+}
