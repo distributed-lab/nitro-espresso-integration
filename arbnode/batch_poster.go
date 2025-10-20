@@ -46,6 +46,7 @@ import (
 	"github.com/offchainlabs/nitro/cmd/chaininfo"
 	"github.com/offchainlabs/nitro/cmd/genericconf"
 	"github.com/offchainlabs/nitro/daprovider"
+	"github.com/offchainlabs/nitro/espresso/authdb"
 	espresso_key_manager "github.com/offchainlabs/nitro/espresso/key-manager"
 	"github.com/offchainlabs/nitro/espresso/submitter"
 	"github.com/offchainlabs/nitro/espressostreamer"
@@ -615,9 +616,13 @@ func NewBatchPoster(ctx context.Context, opts *BatchPosterOpts) (*BatchPoster, e
 				initAddresses = []common.Address{addr}
 			}
 
+			db, err := authdb.NewAuthDB(opts.DataPosterDB, nil)
+			if err != nil {
+				return nil, err
+			}
 			monitor := NewBatcherAddrMonitor(
 				initAddresses,
-				opts.DataPosterDB,
+				db,
 				opts.L1Reader,
 				opts.DeployInfo.SequencerInbox,
 				opts.DeployInfo.DeployedAt,
