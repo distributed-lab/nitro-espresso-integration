@@ -416,9 +416,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
 COPY ./supervisord.conf /etc/supervisor/supervisord.conf
 WORKDIR /home/user/
 COPY ./runeif.sh .
-COPY ./close_chain.sh .
-RUN chmod 700 runeif.sh && \
-    chmod 700 close_chain.sh
+RUN chmod 700 runeif.sh
 ENTRYPOINT [ "/home/user/runeif.sh" ]
 
 FROM nitro-node AS nitro-node-default
